@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+*.ipynb
+
+# Environment
+.env
+.venv
+env/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Data and outputs (keep structure but not large files)
+*.log
+*.nc
+*.netcdf
+*.h5
+*.hdf5
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+analyze_precision_simple.py
+run_enhanced_simple.py
+
+# Keep output structure but not all data
+output/models/*
+!output/models/.gitkeep
+output/results/*.json
+!output/results/.gitkeep
+output
