@@ -20,7 +20,7 @@ import argparse
 # Add parent directory to path
 sys.path.append(str(Path(__file__).parent.parent))
 
-from src.compassign.data_generator import generate_synthetic_data
+from src.compassign.synthetic_generator import generate_synthetic_data
 from src.compassign.rt_hierarchical import HierarchicalRTModel
 from src.compassign.peak_assignment import PeakAssignmentModel
 from src.compassign.peak_assignment_enhanced import EnhancedPeakAssignmentModel
@@ -476,12 +476,11 @@ def main():
     
     # Generate synthetic data once
     print_flush("\n1. Generating synthetic data...")
-    params, obs_df, peak_df = generate_synthetic_data(
+    obs_df, peak_df, params = generate_synthetic_data(
         n_species=80,
         n_compounds=60,
         n_clusters=5,
-        n_classes=10,
-        obs_per_compound=20
+        n_classes=10
     )
     
     print_flush(f"  RT observations: {len(obs_df)}")
@@ -490,7 +489,7 @@ def main():
     # Train RT model once (shared across all configurations)
     print_flush("\n2. Training hierarchical RT model...")
     rt_model = HierarchicalRTModel(
-        n_clusters=5,
+        n_clusters=params['n_clusters'],
         n_species=params['n_species'],
         n_classes=params['n_classes'],
         n_compounds=params['n_compounds'],
