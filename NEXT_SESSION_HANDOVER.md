@@ -81,6 +81,14 @@ create_all_diagnostic_plots(trace_rt, ppc_results, output_path, params)
 ### 3. Production Testing
 Test with full parameters on a server:
 ```bash
+# Standard model (baseline)
+PYTHONPATH=. python scripts/train.py \
+    --model standard \
+    --n-samples 1000 \
+    --n-chains 4 \
+    --n-tune 1000
+
+# Enhanced model (production)
 PYTHONPATH=. python scripts/train.py \
     --model enhanced \
     --n-samples 1000 \
@@ -113,6 +121,13 @@ PYTHONPATH=. python scripts/train.py \
     --test-thresholds
 ```
 
+## Model Strategy Update (2025-08-27)
+Simplified to two-model system:
+- **Standard Model**: Baseline with high recall (~99%), lower precision (~93%)
+- **Enhanced Model**: Production with high precision (>95%), balanced recall (~92%)
+
+The previous "Enhanced Ultra" configuration provided minimal improvement (0.03% precision gain) while sacrificing recall, so it was removed for simplicity.
+
 ## Status
 ✅ **RESOLVED** - Training pipeline now completes all steps successfully. Some features temporarily disabled but can be re-enabled with proper fixes later.
 
@@ -120,3 +135,4 @@ PYTHONPATH=. python scripts/train.py \
 Issue resolved: 2025-08-27
 Resolved by: Claude (Anthropic)
 Status: Working with temporary workarounds
+Model simplification: 2025-08-27 (reduced from 3 to 2 models)

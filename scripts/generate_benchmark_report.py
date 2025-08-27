@@ -606,9 +606,8 @@ def main():
     verification_dir = Path("output/verification")
     
     configs = {
-        "Standard Baseline": verification_dir / "standard",
-        "Enhanced Production": verification_dir / "enhanced_production",
-        "Enhanced Ultra-High": verification_dir / "enhanced_ultra"
+        "Standard Model": verification_dir / "standard",
+        "Enhanced Model": verification_dir / "enhanced"
     }
     
     # Load all metrics
