@@ -258,6 +258,15 @@ def create_cost_benefit_analysis(configs, plots_dir):
         thresholds = data['thresholds']
         
         # Calculate total cost for each threshold
+        # Check if false_negatives column exists, calculate it if not
+        if 'false_negatives' not in thresholds.columns:
+            # Assuming we have a fixed number of true positives + false negatives
+            # We can estimate false_negatives from recall
+            # recall = TP / (TP + FN), so FN = TP * (1/recall - 1)
+            # For simplicity, we'll use a fixed total of 1612 actual compounds
+            total_actual = 1612
+            thresholds['false_negatives'] = total_actual - (thresholds['recall'] * total_actual).astype(int)
+        
         total_cost = (thresholds['false_positives'] * fp_cost + 
                      thresholds['false_negatives'] * fn_cost)
         
