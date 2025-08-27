@@ -4,7 +4,6 @@ version = "1.0.0"
 description = "Bayesian framework for ultra-high precision compound assignment in untargeted metabolomics"
 authors = ["Metabolon Internal"]
 readme = "README.md"
-python = "^3.10"
 
 [tool.poetry.dependencies]
 python = "^3.10"
