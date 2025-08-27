@@ -55,10 +55,16 @@ def create_all_diagnostic_plots(trace: az.InferenceData,
     plot_forest(trace, plots_path)
     
     # 6. Posterior predictive checks
-    plot_ppc(ppc_results, plots_path)
+    if ppc_results and 'y_true' in ppc_results:
+        plot_ppc(ppc_results, plots_path)
+    else:
+        print("  Skipping PPC plots (no PPC results available)")
     
     # 7. Residual diagnostics
-    plot_residuals(ppc_results, plots_path)
+    if ppc_results and 'residuals' in ppc_results:
+        plot_residuals(ppc_results, plots_path)
+    else:
+        print("  Skipping residual plots (no PPC results available)")
     
     # 8. R-hat and ESS diagnostics
     plot_rhat_ess(trace, plots_path)

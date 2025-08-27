@@ -223,7 +223,13 @@ def main():
     
     # Create RT diagnostic plots
     print_flush("\n3. Creating RT model diagnostic plots...")
-    create_all_diagnostic_plots(trace_rt, rt_model, obs_df, output_path)
+    try:
+        # For now, skip PPC results as we need to implement that separately
+        # Just pass an empty dict for ppc_results
+        create_all_diagnostic_plots(trace_rt, {}, output_path, params)
+    except Exception as e:
+        print_flush(f"WARNING: Could not create diagnostic plots: {e}")
+        print_flush("Continuing with training...")
     
     # Train assignment model (standard or enhanced)
     if args.model == 'enhanced':
@@ -343,7 +349,14 @@ def main():
     
     # Create assignment plots
     print_flush("\n7. Creating assignment plots...")
-    create_assignment_plots(trace_assignment, assignment_model, peak_df, output_path)
+    # Pass the correct parameters: logit_df, trace, results dict, output_path
+    assignment_results_dict = {
+        'precision': results.precision,
+        'recall': results.recall,
+        'f1_score': results.f1_score,
+        'confusion_matrix': results.confusion_matrix
+    }
+    create_assignment_plots(logit_df, trace_assignment, assignment_results_dict, output_path)
     
     # Test threshold impact if requested
     if args.test_thresholds:
