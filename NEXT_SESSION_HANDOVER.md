@@ -174,8 +174,37 @@ PYTHONPATH=. python scripts/train.py --n-samples 100
 
 The ablation study (`scripts/ablation_study.py`) should be kept as evidence of why we simplified. It proves that complex modeling doesn't beat simple parameter tuning for this problem.
 
+## Future Enhancement: Uncertainty-Informed Candidate Generation
+
+### Promising Idea (Not Implemented Yet)
+Use RT prediction uncertainty to create adaptive search windows for candidate generation:
+
+```python
+# Current: Only mass filtering
+candidates = filter(|mass_diff| < 0.005)
+
+# Proposed: Mass + adaptive RT filtering  
+rt_window = 3 * rt_uncertainty  # Adapts to prediction confidence
+candidates = filter(|mass_diff| < 0.005 AND |rt_diff| < rt_window)
+```
+
+### Why This Could Work
+- **Different from adding uncertainty as feature** (which was redundant)
+- **Reduces candidate pool** before statistical model (e.g., 50→5 candidates)
+- **Handles sample-specific effects** (batch, drift, matrix)
+- **Adapts to compound characterization** (tight window for well-known, wide for novel)
+
+### Research Questions
+1. Optimal sigma multiplier for RT windows?
+2. Interaction between mass tolerance and RT filtering?
+3. Computational cost vs candidate reduction benefit?
+
+### Not a Priority Now
+First complete the simplification to single model, then consider this as v2 enhancement.
+
 ## Contact Info
 - Pipeline fix completed: 2025-08-27
 - Ablation study completed: 2025-08-27 
 - Simplification started: 2025-08-27
 - **Status: IN PROGRESS - Continue removing enhanced model code**
+- **Next innovation to explore**: Uncertainty-informed candidate windows
