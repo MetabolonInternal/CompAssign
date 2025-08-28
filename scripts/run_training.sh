@@ -21,8 +21,11 @@ NC='\033[0m' # No Color
 
 # Default values (recommended based on testing)
 N_SAMPLES=1000
-MASS_TOL=0.005
+PPM_TOL=5.0
+RT_WINDOW=3.0
+MATCHING="hungarian"
 THRESHOLD=0.9
+TARGET_ACCEPT=0.99
 TEST_THRESHOLDS=false
 
 # Parse arguments
@@ -35,11 +38,14 @@ if [[ "$1" == "--help" ]] || [[ "$1" == "-h" ]]; then
     echo "  ./scripts/run_training.sh 1000 0.8     # Custom samples and threshold"
     echo "  ./scripts/run_training.sh --quick      # Quick test (100 samples)"
     echo "  ./scripts/run_training.sh --test       # Test multiple thresholds"
+    echo "  ./scripts/run_training.sh --greedy     # Use greedy matching instead of Hungarian"
+    echo "  ./scripts/run_training.sh --no-matching # No one-to-one constraint (high recall)"
     echo ""
     echo "Default parameters (recommended):"
-    echo "  • Mass tolerance: 0.005 Da"
+    echo "  • PPM tolerance: 5.0 ppm"
+    echo "  • RT window: ±3σ"
+    echo "  • Matching: Hungarian (optimal one-to-one)"
     echo "  • Probability threshold: 0.9"
-    echo "  • Expected precision: 99.5%"
     echo ""
     echo "Examples:"
     echo "  # Production training"
@@ -70,6 +76,32 @@ if [[ "$1" == "--test" ]]; then
     shift
 fi
 
+# Greedy matching mode
+if [[ "$1" == "--greedy" ]]; then
+    MATCHING="greedy"
+    echo -e "${YELLOW}Using greedy matching algorithm${NC}"
+    shift
+fi
+
+# None matching mode (no one-to-one constraint)
+if [[ "$1" == "--no-matching" ]]; then
+    MATCHING="none"
+    echo -e "${YELLOW}Using no matching constraint (allows multiple assignments per compound)${NC}"
+    shift
+fi
+
+# Target accept parameter
+if [[ "$1" == "--target-accept" ]]; then
+    shift
+    if [[ -n "$1" ]] && [[ "$1" =~ ^[0-9]*\.?[0-9]+$ ]]; then
+        TARGET_ACCEPT=$1
+        echo -e "${YELLOW}Using target_accept=$TARGET_ACCEPT for MCMC${NC}"
+        shift
+    else
+        echo -e "${YELLOW}Warning: Invalid target-accept value, using default${NC}"
+    fi
+fi
+
 # Custom sample count
 if [[ -n "$1" ]] && [[ "$1" =~ ^[0-9]+$ ]]; then
     N_SAMPLES=$1
@@ -96,19 +128,10 @@ echo -e "${BLUE}============================================${NC}"
 echo ""
 echo "Configuration:"
 echo "  • Samples: $N_SAMPLES"
-echo "  • Mass tolerance: $MASS_TOL Da (effective in testing)"
+echo "  • PPM tolerance: $PPM_TOL ppm"
+echo "  • RT window: ±${RT_WINDOW}σ"
+echo "  • Matching: $MATCHING"
 echo "  • Probability threshold: $THRESHOLD"
-
-# Display expected performance based on threshold
-if (( $(echo "$THRESHOLD == 0.9" | bc -l) )); then
-    echo -e "  • Expected precision: ${GREEN}99.5%${NC} (achieved in testing)"
-elif (( $(echo "$THRESHOLD == 0.8" | bc -l) )); then
-    echo -e "  • Expected precision: ${YELLOW}~95%${NC} (more recall)"
-elif (( $(echo "$THRESHOLD == 0.7" | bc -l) )); then
-    echo -e "  • Expected precision: ${YELLOW}~90%${NC} (balanced)"
-else
-    echo -e "  • Expected precision: ${YELLOW}Unknown${NC} (custom threshold)"
-fi
 
 echo ""
 echo -e "${BLUE}============================================${NC}"
@@ -117,8 +140,11 @@ echo ""
 # Build the training command
 CMD="PYTHONPATH=. python scripts/train.py"
 CMD="$CMD --n-samples $N_SAMPLES"
-CMD="$CMD --mass-tolerance $MASS_TOL"
+CMD="$CMD --ppm-tolerance $PPM_TOL"
+CMD="$CMD --rt-window-k $RT_WINDOW"
+CMD="$CMD --matching $MATCHING"
 CMD="$CMD --probability-threshold $THRESHOLD"
+CMD="$CMD --target-accept $TARGET_ACCEPT"
 
 if [[ "$TEST_THRESHOLDS" == true ]]; then
     CMD="$CMD --test-thresholds"

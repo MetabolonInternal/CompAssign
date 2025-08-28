@@ -60,10 +60,15 @@ def parse_args():
                        help='Target acceptance rate for NUTS')
     
     # Model parameters (tested for 99.5% precision)
-    parser.add_argument('--mass-tolerance', type=float, default=0.005,
-                       help='Mass tolerance in Da (effective in testing: 0.005)')
+    parser.add_argument('--ppm-tolerance', type=float, default=5.0,
+                       help='Mass tolerance in ppm (default: 5.0 ppm)')
+    parser.add_argument('--rt-window-k', type=float, default=3.0,
+                       help='RT window multiplier k*sigma (default: 3.0)')
     parser.add_argument('--probability-threshold', type=float, default=0.9,
                        help='Probability threshold (recommended: 0.9 for 99.5%% precision)')
+    parser.add_argument('--matching', type=str, default='hungarian',
+                       choices=['hungarian', 'greedy', 'none'],
+                       help='One-to-one matching algorithm (default: hungarian)')
     parser.add_argument('--test-thresholds', action='store_true',
                        help='Test multiple probability thresholds')
     
@@ -135,10 +140,10 @@ def main():
     
     print_flush("="*60)
     print_flush("COMPASSIGN TRAINING PIPELINE")
-    print_flush("Using Recommended Parameters")
-    print_flush(f"Mass tolerance: {args.mass_tolerance} Da {'✓' if args.mass_tolerance == 0.005 else '(custom)'}")
-    print_flush(f"Probability threshold: {args.probability_threshold} {'✓' if args.probability_threshold == 0.9 else '(custom)'}")
-    print_flush("Expected: 99.5% precision with default parameters")
+    print_flush(f"PPM tolerance: {args.ppm_tolerance} ppm")
+    print_flush(f"RT window: ±{args.rt_window_k}σ")
+    print_flush(f"Matching: {args.matching}")
+    print_flush(f"Probability threshold: {args.probability_threshold}")
     print_flush("="*60)
     
     # Save configuration
@@ -209,15 +214,15 @@ def main():
     
     # Train peak assignment model
     print_flush("\n4. Training peak assignment model...")
-    print_flush(f"   Mass tolerance: {args.mass_tolerance} Da")
+    print_flush(f"   Mass tolerance: {args.ppm_tolerance} ppm")
+    print_flush(f"   RT window: ±{args.rt_window_k}σ")
+    print_flush(f"   Matching algorithm: {args.matching}")
     print_flush(f"   Probability threshold: {args.probability_threshold}")
-    if args.mass_tolerance == 0.005 and args.probability_threshold == 0.9:
-        print_flush("   ✓ Using recommended configuration (99.5% precision expected)")
-    else:
-        print_flush("   ⚠ Using custom parameters (performance may vary)")
     
     assignment_model = PeakAssignmentModel(
-        mass_tolerance=args.mass_tolerance
+        ppm_tolerance=args.ppm_tolerance,
+        rt_window_k=args.rt_window_k,
+        matching=args.matching
     )
     
     # Compute RT predictions
@@ -275,7 +280,9 @@ def main():
     # Save metrics
     metrics = {
         'timestamp': datetime.now().isoformat(),
-        'mass_tolerance': args.mass_tolerance,
+        'ppm_tolerance': args.ppm_tolerance,
+        'rt_window_k': args.rt_window_k,
+        'matching': args.matching,
         'probability_threshold': args.probability_threshold,
         'precision': results.precision,
         'recall': results.recall,
@@ -306,16 +313,14 @@ def main():
     print_flush("TRAINING COMPLETE")
     print_flush("="*60)
     print_flush(f"\nPerformance:")
-    print_flush(f"  Precision: {results.precision:.1%} {'✓ EXCELLENT' if results.precision >= 0.99 else '✓ GOOD' if results.precision >= 0.95 else '⚠ Below target'}")
+    print_flush(f"  Precision: {results.precision:.1%}")
     print_flush(f"  Recall: {results.recall:.1%}")
     print_flush(f"  False Positives: {results.confusion_matrix['FP']}")
     
-    if args.mass_tolerance == 0.005 and args.probability_threshold == 0.9:
-        print_flush(f"\n✓ Using recommended parameters")
-    else:
-        print_flush(f"\nUsing custom parameters:")
-        print_flush(f"  Mass tolerance: {args.mass_tolerance} Da (recommended: 0.005)")
-        print_flush(f"  Probability threshold: {args.probability_threshold} (recommended: 0.9)")
+    if args.ppm_tolerance != 5.0 or args.probability_threshold != 0.9:
+        print_flush(f"\nParameters used:")
+        print_flush(f"  PPM tolerance: {args.ppm_tolerance} ppm")
+        print_flush(f"  Probability threshold: {args.probability_threshold}")
     
     print_flush(f"\nOutput directory: {output_path}/")
     
