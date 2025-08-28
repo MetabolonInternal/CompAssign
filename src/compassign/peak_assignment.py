@@ -32,17 +32,25 @@ class PeakAssignmentModel:
     as features to predict whether a peak-compound pair is a true match.
     """
     
-    def __init__(self, mass_tolerance: float = 0.005):
+    def __init__(self, 
+                 mass_tolerance: float = 0.005,
+                 rt_window_k: float = 1.5,
+                 matching: str = "hungarian"):
         """
         Initialize the peak assignment model.
         
         Parameters
         ----------
         mass_tolerance : float
-            Mass tolerance in Da for candidate generation (default: 0.005 Da = 5 ppm)
-            Note: Ablation study showed 0.005 Da achieves >95% precision
+            Mass tolerance in Da for candidate generation (default: 0.005 Da)
+        rt_window_k : float
+            RT window multiplier for filtering (default: 1.5, meaning ±1.5σ)
+        matching : str
+            Matching algorithm: 'hungarian', 'greedy', or 'none' (default: 'hungarian')
         """
         self.mass_tolerance = mass_tolerance
+        self.rt_window_k = rt_window_k
+        self.matching = matching
         self.model = None
         self.trace = None
         self.logit_df = None
@@ -134,8 +142,13 @@ class PeakAssignmentModel:
             raise ValueError("RT predictions not computed. Run compute_rt_predictions first.")
         
         print(f"Generating candidate assignments with mass tolerance ±{self.mass_tolerance} Da...")
+        print(f"  RT window: ±{self.rt_window_k}σ")
         
         logit_data = []
+        n_mass_filtered = 0
+        n_rt_filtered = 0
+        n_total = 0
+        max_rt_z = 0  # Track maximum RT z-score seen
         
         # Iterate over peaks to generate candidate assignments
         for _, peak in peak_df.iterrows():
@@ -153,29 +166,66 @@ class PeakAssignmentModel:
             
             # Check candidate compounds by mass tolerance
             for m in range(n_compounds):
-                if abs(mz - compound_mass[m]) <= self.mass_tolerance:
-                    # Compute features
-                    mass_error_ppm = (mz - compound_mass[m]) / compound_mass[m] * 1e6
-                    
-                    # RT z-score using predictions
-                    rt_pred_mean, rt_pred_std = self.rt_predictions[(s, m)]
-                    rt_z = (rt - rt_pred_mean) / rt_pred_std if rt_pred_std > 0 else 0
-                    
-                    # Log intensity
-                    log_intensity = np.log10(intensity) if intensity > 0 else 0
-                    
-                    # Label (1 if true match, 0 otherwise)
-                    label = 1 if (true_comp is not None and true_comp == m) else 0
-                    
-                    logit_data.append((peak_id, s, m, mass_error_ppm, rt_z, log_intensity, label))
+                n_total += 1
+                
+                # Filter by absolute mass tolerance
+                mass_error_da = abs(mz - compound_mass[m])
+                if mass_error_da > self.mass_tolerance:
+                    n_mass_filtered += 1
+                    continue
+                
+                # Compute mass error in PPM for feature
+                mass_error_ppm = (mz - compound_mass[m]) / compound_mass[m] * 1e6
+                
+                # RT filtering using k*sigma window
+                rt_pred_mean, rt_pred_std = self.rt_predictions[(s, m)]
+                
+                # Handle edge case: if std is very small, use a large z-score for filtering
+                if rt_pred_std > 0.01:  # Normal case
+                    rt_z = (rt - rt_pred_mean) / rt_pred_std
+                else:  # Very small std - be strict about RT matching
+                    rt_z = (rt - rt_pred_mean) / 0.01  # Use 0.01 as minimum std
+                
+                max_rt_z = max(max_rt_z, abs(rt_z))
+                
+                # Apply RT window filtering
+                if abs(rt_z) > self.rt_window_k:
+                    n_rt_filtered += 1
+                    continue
+                
+                # Log intensity
+                log_intensity = np.log10(intensity) if intensity > 0 else 0
+                
+                # Label (1 if true match, 0 otherwise)
+                label = 1 if (true_comp is not None and true_comp == m) else 0
+                
+                logit_data.append((peak_id, s, m, mass_error_ppm, rt_z, log_intensity, label))
         
         self.logit_df = pd.DataFrame(logit_data, 
                                      columns=['peak_id', 'species', 'compound', 
                                              'mass_err_ppm', 'rt_z', 'log_intensity', 'label'])
         
-        print(f"Logistic training pairs count: {len(self.logit_df)}")
-        print(f"Positive (true) assignments: {self.logit_df['label'].sum()}")
-        print(f"Negative (false) assignments: {(1 - self.logit_df['label']).sum()}")
+        # Report filtering statistics
+        n_kept = len(self.logit_df)
+        print(f"\nCandidate generation statistics:")
+        print(f"  Total possible pairs: {n_total}")
+        print(f"  Filtered by mass (Da): {n_mass_filtered}")
+        print(f"  Filtered by RT window: {n_rt_filtered}")
+        print(f"  Kept for training: {n_kept}")
+        if n_total > 0:
+            print(f"  Reduction: {(1 - n_kept/n_total)*100:.1f}%")
+        print(f"  Positive (true) assignments: {self.logit_df['label'].sum()}")
+        print(f"  Negative (false) assignments: {(1 - self.logit_df['label']).sum()}")
+        
+        # Diagnostic info about RT filtering
+        if max_rt_z > 0:
+            print(f"\nRT filtering diagnostics:")
+            print(f"  Maximum |RT z-score| observed: {max_rt_z:.2f}")
+            print(f"  RT window threshold (k): {self.rt_window_k}")
+            if n_rt_filtered == 0 and max_rt_z > self.rt_window_k:
+                print(f"  WARNING: Some candidates exceed threshold but weren't filtered!")
+            elif n_rt_filtered == 0:
+                print(f"  Note: All candidates within ±{self.rt_window_k}σ window")
         
         return self.logit_df
     

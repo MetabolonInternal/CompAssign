@@ -60,10 +60,10 @@ def parse_args():
                        help='Target acceptance rate for NUTS')
     
     # Model parameters (tested for 99.5% precision)
-    parser.add_argument('--ppm-tolerance', type=float, default=5.0,
-                       help='Mass tolerance in ppm (default: 5.0 ppm)')
-    parser.add_argument('--rt-window-k', type=float, default=3.0,
-                       help='RT window multiplier k*sigma (default: 3.0)')
+    parser.add_argument('--mass-tolerance', type=float, default=0.005,
+                       help='Mass tolerance in Da (default: 0.005 Da)')
+    parser.add_argument('--rt-window-k', type=float, default=1.5,
+                       help='RT window multiplier k*sigma (default: 1.5)')
     parser.add_argument('--probability-threshold', type=float, default=0.9,
                        help='Probability threshold (recommended: 0.9 for 99.5%% precision)')
     parser.add_argument('--matching', type=str, default='hungarian',
@@ -140,7 +140,7 @@ def main():
     
     print_flush("="*60)
     print_flush("COMPASSIGN TRAINING PIPELINE")
-    print_flush(f"PPM tolerance: {args.ppm_tolerance} ppm")
+    print_flush(f"Mass tolerance: {args.mass_tolerance} Da")
     print_flush(f"RT window: ±{args.rt_window_k}σ")
     print_flush(f"Matching: {args.matching}")
     print_flush(f"Probability threshold: {args.probability_threshold}")
@@ -214,13 +214,13 @@ def main():
     
     # Train peak assignment model
     print_flush("\n4. Training peak assignment model...")
-    print_flush(f"   Mass tolerance: {args.ppm_tolerance} ppm")
+    print_flush(f"   Mass tolerance: {args.mass_tolerance} Da")
     print_flush(f"   RT window: ±{args.rt_window_k}σ")
     print_flush(f"   Matching algorithm: {args.matching}")
     print_flush(f"   Probability threshold: {args.probability_threshold}")
     
     assignment_model = PeakAssignmentModel(
-        ppm_tolerance=args.ppm_tolerance,
+        mass_tolerance=args.mass_tolerance,
         rt_window_k=args.rt_window_k,
         matching=args.matching
     )
@@ -280,7 +280,7 @@ def main():
     # Save metrics
     metrics = {
         'timestamp': datetime.now().isoformat(),
-        'ppm_tolerance': args.ppm_tolerance,
+        'mass_tolerance': args.mass_tolerance,
         'rt_window_k': args.rt_window_k,
         'matching': args.matching,
         'probability_threshold': args.probability_threshold,
@@ -317,9 +317,9 @@ def main():
     print_flush(f"  Recall: {results.recall:.1%}")
     print_flush(f"  False Positives: {results.confusion_matrix['FP']}")
     
-    if args.ppm_tolerance != 5.0 or args.probability_threshold != 0.9:
+    if args.mass_tolerance != 0.005 or args.probability_threshold != 0.9:
         print_flush(f"\nParameters used:")
-        print_flush(f"  PPM tolerance: {args.ppm_tolerance} ppm")
+        print_flush(f"  Mass tolerance: {args.mass_tolerance} Da")
         print_flush(f"  Probability threshold: {args.probability_threshold}")
     
     print_flush(f"\nOutput directory: {output_path}/")

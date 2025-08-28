@@ -21,8 +21,8 @@ NC='\033[0m' # No Color
 
 # Default values (recommended based on testing)
 N_SAMPLES=1000
-PPM_TOL=5.0
-RT_WINDOW=3.0
+MASS_TOL=0.005
+RT_WINDOW=1.5
 MATCHING="hungarian"
 THRESHOLD=0.9
 TARGET_ACCEPT=0.99
@@ -42,8 +42,8 @@ if [[ "$1" == "--help" ]] || [[ "$1" == "-h" ]]; then
     echo "  ./scripts/run_training.sh --no-matching # No one-to-one constraint (high recall)"
     echo ""
     echo "Default parameters (recommended):"
-    echo "  • PPM tolerance: 5.0 ppm"
-    echo "  • RT window: ±3σ"
+    echo "  • Mass tolerance: 0.005 Da"
+    echo "  • RT window: ±1.5σ"
     echo "  • Matching: Hungarian (optimal one-to-one)"
     echo "  • Probability threshold: 0.9"
     echo ""
@@ -128,7 +128,7 @@ echo -e "${BLUE}============================================${NC}"
 echo ""
 echo "Configuration:"
 echo "  • Samples: $N_SAMPLES"
-echo "  • PPM tolerance: $PPM_TOL ppm"
+echo "  • Mass tolerance: $MASS_TOL Da"
 echo "  • RT window: ±${RT_WINDOW}σ"
 echo "  • Matching: $MATCHING"
 echo "  • Probability threshold: $THRESHOLD"
@@ -140,7 +140,7 @@ echo ""
 # Build the training command
 CMD="PYTHONPATH=. python scripts/train.py"
 CMD="$CMD --n-samples $N_SAMPLES"
-CMD="$CMD --ppm-tolerance $PPM_TOL"
+CMD="$CMD --mass-tolerance $MASS_TOL"
 CMD="$CMD --rt-window-k $RT_WINDOW"
 CMD="$CMD --matching $MATCHING"
 CMD="$CMD --probability-threshold $THRESHOLD"
