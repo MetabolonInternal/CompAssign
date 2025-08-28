@@ -11,11 +11,9 @@ __author__ = "Metabolon CompAssign Team"
 from .synthetic_generator import generate_synthetic_data
 from .rt_hierarchical import HierarchicalRTModel
 from .peak_assignment import PeakAssignmentModel
-from .peak_assignment_enhanced import EnhancedPeakAssignmentModel
 
 __all__ = [
     "generate_synthetic_data",
     "HierarchicalRTModel", 
-    "PeakAssignmentModel",
-    "EnhancedPeakAssignmentModel"
+    "PeakAssignmentModel"
 ]

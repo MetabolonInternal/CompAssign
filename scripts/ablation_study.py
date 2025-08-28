@@ -4,6 +4,13 @@ Ablation Study for CompAssign Model Components
 
 This script systematically tests different model configurations to isolate
 the impact of each change on precision and recall.
+
+IMPORTANT NOTE (2025-08-28): This ablation study proved that simple parameter
+tuning (mass_tolerance=0.005, threshold=0.9) outperforms complex model architectures.
+As a result, the EnhancedPeakAssignmentModel has been removed from the codebase.
+This script is kept as historical evidence of why we simplified.
+
+To run configurations that don't require the enhanced model, use --quick flag.
 """
 
 import sys
@@ -23,7 +30,15 @@ sys.path.append(str(Path(__file__).parent.parent))
 from src.compassign.synthetic_generator import generate_synthetic_data
 from src.compassign.rt_hierarchical import HierarchicalRTModel
 from src.compassign.peak_assignment import PeakAssignmentModel
-from src.compassign.peak_assignment_enhanced import EnhancedPeakAssignmentModel
+
+# Try to import enhanced model (may not exist after simplification)
+try:
+    from src.compassign.peak_assignment_enhanced import EnhancedPeakAssignmentModel
+    ENHANCED_AVAILABLE = True
+except ImportError:
+    ENHANCED_AVAILABLE = False
+    print("Note: Enhanced model not available (codebase has been simplified)")
+    print("Running standard model configurations only...")
 
 
 def print_flush(msg):
@@ -251,6 +266,10 @@ def run_single_configuration(config: AblationConfig,
             results = model.predict_assignments(peak_df, probability_threshold=config.threshold)
             
         else:  # enhanced
+            if not ENHANCED_AVAILABLE:
+                print_flush(f"  ⚠️ Skipping {config.name} - Enhanced model not available")
+                return None
+                
             # Use enhanced model
             model = EnhancedPeakAssignmentModel(
                 mass_tolerance=config.mass_tolerance,

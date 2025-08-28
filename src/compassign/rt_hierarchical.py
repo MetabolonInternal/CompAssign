@@ -149,7 +149,7 @@ class HierarchicalRTModel:
     def sample(self, 
                n_samples: int = 1000, 
                n_tune: int = 1000, 
-               n_chains: int = 2,
+               n_chains: int = None,
                target_accept: float = 0.95,
                max_treedepth: int = 12,
                random_seed: int = 42,
@@ -163,8 +163,8 @@ class HierarchicalRTModel:
             Number of samples per chain
         n_tune : int
             Number of tuning steps
-        n_chains : int
-            Number of MCMC chains
+        n_chains : int, optional
+            Number of MCMC chains (default: None, uses PyMC default)
         target_accept : float
             Target acceptance probability (higher = fewer divergences but slower)
         max_treedepth : int
@@ -182,21 +182,28 @@ class HierarchicalRTModel:
         if self.model is None:
             raise ValueError("Model not built. Call build_model() first.")
         
-        print(f"Sampling with {n_chains} chains, {n_samples} samples each...")
+        chains_str = f"{n_chains} chains" if n_chains is not None else "default chains"
+        print(f"Sampling with {chains_str}, {n_samples} samples each...")
         print(f"Target accept: {target_accept}, Max treedepth: {max_treedepth}")
         
+        # Build sampling kwargs
+        sample_kwargs = {
+            'draws': n_samples,
+            'tune': n_tune,
+            'target_accept': target_accept,
+            'max_treedepth': max_treedepth,
+            'random_seed': random_seed,
+            'init': init,
+            'progressbar': True,
+            'return_inferencedata': True  # Explicitly request InferenceData
+        }
+        
+        # Only add chains if explicitly specified
+        if n_chains is not None:
+            sample_kwargs['chains'] = n_chains
+        
         with self.model:
-            self.trace = pm.sample(
-                n_samples, 
-                tune=n_tune, 
-                chains=n_chains, 
-                target_accept=target_accept,
-                max_treedepth=max_treedepth,
-                random_seed=random_seed,
-                init=init,
-                progressbar=True,
-                return_inferencedata=True  # Explicitly request InferenceData
-            )
+            self.trace = pm.sample(**sample_kwargs)
         
         # TODO: Re-enable divergence and convergence checks
         # Currently disabled due to hanging issues when accessing sample_stats

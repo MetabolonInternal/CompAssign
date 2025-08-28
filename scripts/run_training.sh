@@ -1,0 +1,171 @@
+#!/bin/bash
+#
+# CompAssign Training Runner
+# Runs training with recommended parameters (99.5% precision)
+#
+# Usage:
+#   ./scripts/run_training.sh              # Run with default 1000 samples
+#   ./scripts/run_training.sh 500          # Run with custom sample count
+#   ./scripts/run_training.sh 1000 0.8     # Custom samples and threshold
+#   ./scripts/run_training.sh --quick      # Quick test with 100 samples
+#   ./scripts/run_training.sh --test       # Test thresholds
+#
+
+set -e  # Exit on error
+
+# Color codes
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Default values (recommended based on testing)
+N_SAMPLES=1000
+MASS_TOL=0.005
+THRESHOLD=0.9
+TEST_THRESHOLDS=false
+
+# Parse arguments
+if [[ "$1" == "--help" ]] || [[ "$1" == "-h" ]]; then
+    echo "CompAssign Training Runner"
+    echo ""
+    echo "Usage:"
+    echo "  ./scripts/run_training.sh              # Standard training (1000 samples)"
+    echo "  ./scripts/run_training.sh 500          # Custom sample count"
+    echo "  ./scripts/run_training.sh 1000 0.8     # Custom samples and threshold"
+    echo "  ./scripts/run_training.sh --quick      # Quick test (100 samples)"
+    echo "  ./scripts/run_training.sh --test       # Test multiple thresholds"
+    echo ""
+    echo "Default parameters (recommended):"
+    echo "  • Mass tolerance: 0.005 Da"
+    echo "  • Probability threshold: 0.9"
+    echo "  • Expected precision: 99.5%"
+    echo ""
+    echo "Examples:"
+    echo "  # Production training"
+    echo "  ./scripts/run_training.sh"
+    echo ""
+    echo "  # Quick development test"
+    echo "  ./scripts/run_training.sh --quick"
+    echo ""
+    echo "  # Explore precision-recall tradeoff"
+    echo "  ./scripts/run_training.sh --test"
+    echo ""
+    echo "  # Custom threshold for more recall"
+    echo "  ./scripts/run_training.sh 1000 0.8"
+    exit 0
+fi
+
+# Quick mode
+if [[ "$1" == "--quick" ]]; then
+    N_SAMPLES=100
+    echo -e "${YELLOW}Quick test mode: Using only 100 samples${NC}"
+    shift
+fi
+
+# Test thresholds mode
+if [[ "$1" == "--test" ]]; then
+    TEST_THRESHOLDS=true
+    echo -e "${YELLOW}Testing multiple thresholds for precision-recall analysis${NC}"
+    shift
+fi
+
+# Custom sample count
+if [[ -n "$1" ]] && [[ "$1" =~ ^[0-9]+$ ]]; then
+    N_SAMPLES=$1
+    shift
+fi
+
+# Custom threshold
+if [[ -n "$1" ]] && [[ "$1" =~ ^[0-9]*\.?[0-9]+$ ]]; then
+    THRESHOLD=$1
+    echo -e "${YELLOW}⚠️  Using custom threshold: $THRESHOLD (default: 0.9)${NC}"
+    shift
+fi
+
+# Ensure we're in the project root
+cd "$(dirname "$0")/.."
+
+# Create output directories
+OUTPUT_DIR="output"
+mkdir -p "$OUTPUT_DIR"/{data,models,results,plots}
+
+echo -e "${BLUE}============================================${NC}"
+echo -e "${BLUE}       CompAssign Training Pipeline         ${NC}"
+echo -e "${BLUE}============================================${NC}"
+echo ""
+echo "Configuration:"
+echo "  • Samples: $N_SAMPLES"
+echo "  • Mass tolerance: $MASS_TOL Da (effective in testing)"
+echo "  • Probability threshold: $THRESHOLD"
+
+# Display expected performance based on threshold
+if (( $(echo "$THRESHOLD == 0.9" | bc -l) )); then
+    echo -e "  • Expected precision: ${GREEN}99.5%${NC} (achieved in testing)"
+elif (( $(echo "$THRESHOLD == 0.8" | bc -l) )); then
+    echo -e "  • Expected precision: ${YELLOW}~95%${NC} (more recall)"
+elif (( $(echo "$THRESHOLD == 0.7" | bc -l) )); then
+    echo -e "  • Expected precision: ${YELLOW}~90%${NC} (balanced)"
+else
+    echo -e "  • Expected precision: ${YELLOW}Unknown${NC} (custom threshold)"
+fi
+
+echo ""
+echo -e "${BLUE}============================================${NC}"
+echo ""
+
+# Build the training command
+CMD="PYTHONPATH=. python scripts/train.py"
+CMD="$CMD --n-samples $N_SAMPLES"
+CMD="$CMD --mass-tolerance $MASS_TOL"
+CMD="$CMD --probability-threshold $THRESHOLD"
+
+if [[ "$TEST_THRESHOLDS" == true ]]; then
+    CMD="$CMD --test-thresholds"
+fi
+
+CMD="$CMD --output-dir $OUTPUT_DIR"
+
+# Run training
+echo -e "${YELLOW}Starting training...${NC}"
+echo "Command: $CMD"
+echo ""
+
+# Execute with timing
+start_time=$(date +%s)
+
+# Run the command and capture exit code
+if eval $CMD; then
+    end_time=$(date +%s)
+    duration=$((end_time - start_time))
+    
+    echo ""
+    echo -e "${GREEN}✅ Training completed in $((duration / 60))m $((duration % 60))s${NC}"
+    echo ""
+    # The Python script already printed detailed results above
+    
+    if [[ "$TEST_THRESHOLDS" == true ]] && [[ -f "$OUTPUT_DIR/results/threshold_analysis.csv" ]]; then
+        echo ""
+        echo "Threshold analysis saved to: $OUTPUT_DIR/results/threshold_analysis.csv"
+    fi
+    
+    echo -e "${GREEN}============================================${NC}"
+else
+    end_time=$(date +%s)
+    duration=$((end_time - start_time))
+    
+    echo ""
+    echo -e "\033[0;31m============================================${NC}"
+    echo -e "\033[0;31m❌ Training failed${NC}"
+    echo -e "\033[0;31m============================================${NC}"
+    echo ""
+    echo "Duration before failure: $((duration / 60)) minutes $((duration % 60)) seconds"
+    echo ""
+    echo "Troubleshooting:"
+    echo "  1. Check if conda environment is activated: conda activate compassign"
+    echo "  2. Verify all dependencies are installed: conda env update -f environment.yml"
+    echo "  3. Check error messages above for specific issues"
+    echo ""
+    echo "For quick testing, try: ./scripts/run_training.sh --quick"
+    exit 1
+fi

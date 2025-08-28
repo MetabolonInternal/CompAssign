@@ -12,7 +12,7 @@
 - **False Positives: 7** (vs 9 for enhanced)
 - **No code changes needed** - just parameter adjustments!
 
-### Optimal Configuration
+### Effective Configuration
 ```python
 # Standard model with:
 mass_tolerance = 0.005  # (was 0.01)
@@ -32,7 +32,7 @@ threshold = 0.9         # (was 0.5)
 ### ✅ Done
 1. Fixed training pipeline hanging issue
 2. Created and ran ablation study
-3. Identified optimal parameters (mass_tolerance: 0.005, threshold: 0.9)
+3. Identified effective parameters (mass_tolerance: 0.005, threshold: 0.9)
 4. Created comprehensive plan for simplification
 
 ### ⚠️ Partially Done (NEEDS COMPLETION)
@@ -158,7 +158,7 @@ PYTHONPATH=. python scripts/train.py --n-samples 100
 # Verification
 ./scripts/run_verification.sh
 
-# Ablation (should show standard params are optimal)
+# Ablation (should show standard params are effective)
 ./scripts/run_ablation.sh --quick
 ```
 
@@ -195,7 +195,7 @@ candidates = filter(|mass_diff| < 0.005 AND |rt_diff| < rt_window)
 - **Adapts to compound characterization** (tight window for well-known, wide for novel)
 
 ### Research Questions
-1. Optimal sigma multiplier for RT windows?
+1. Best sigma multiplier for RT windows?
 2. Interaction between mass tolerance and RT filtering?
 3. Computational cost vs candidate reduction benefit?
 

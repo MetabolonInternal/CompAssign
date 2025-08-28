@@ -216,7 +216,7 @@ class PeakAssignmentModel:
     def sample(self,
               n_samples: int = 1000,
               n_tune: int = 1000,
-              n_chains: int = 2,
+              n_chains: int = None,
               target_accept: float = 0.95,
               random_seed: int = 42) -> az.InferenceData:
         """
@@ -228,8 +228,8 @@ class PeakAssignmentModel:
             Number of samples per chain
         n_tune : int
             Number of tuning steps
-        n_chains : int
-            Number of MCMC chains
+        n_chains : int, optional
+            Number of MCMC chains (default: None, uses PyMC default)
         target_accept : float
             Target acceptance probability
         random_seed : int
@@ -243,17 +243,24 @@ class PeakAssignmentModel:
         if self.model is None:
             raise ValueError("Model not built. Call build_model first.")
         
-        print(f"\nSampling logistic model with {n_chains} chains, {n_samples} samples each...")
+        chains_str = f"{n_chains} chains" if n_chains is not None else "default chains"
+        print(f"\nSampling logistic model with {chains_str}, {n_samples} samples each...")
+        
+        # Build sampling kwargs
+        sample_kwargs = {
+            'draws': n_samples,
+            'tune': n_tune,
+            'target_accept': target_accept,
+            'random_seed': random_seed,
+            'progressbar': True
+        }
+        
+        # Only add chains if explicitly specified
+        if n_chains is not None:
+            sample_kwargs['chains'] = n_chains
         
         with self.model:
-            self.trace = pm.sample(
-                n_samples,
-                tune=n_tune,
-                chains=n_chains,
-                target_accept=target_accept,
-                random_seed=random_seed,
-                progressbar=True
-            )
+            self.trace = pm.sample(**sample_kwargs)
         
         # Check convergence
         rhat_vals = az.rhat(self.trace).to_dataframe()

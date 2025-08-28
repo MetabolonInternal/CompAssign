@@ -33,6 +33,9 @@ dependencies:
   - jupyter
   - pip
   
+  # Report generation
+  - tabulate  # For markdown tables in benchmark reports
+  
   # Optional: Faster sampling (uncomment if needed)
   # - numpyro  # Requires JAX, may have compatibility issues
   

@@ -1,8 +1,13 @@
 # Probability Calibration in CompAssign
 
+> **⚠️ DEPRECATION NOTICE (2025-08-28):**  
+> The ablation study proved that probability calibration provides no benefit for compound assignment. Simple parameter tuning (mass_tolerance=0.005, threshold=0.9) achieves 99.5% precision without calibration. This document is retained for historical reference only.
+>
+> **Current Status**: The enhanced model and probability calibration have been removed from the codebase in favor of the simpler, better-performing parameter optimization approach.
+
 ## Executive Summary
 
-CompAssign employs isotonic regression for probability calibration as a critical post-processing step in the enhanced model. This document explains why calibration is necessary, how it works mathematically, and its impact on achieving >95% precision for Metabolon's requirements.
+~~CompAssign employs isotonic regression for probability calibration as a critical post-processing step in the enhanced model.~~ **[DEPRECATED]** This document explains why calibration was initially considered, how it works mathematically, and why it was ultimately found to be unnecessary.
 
 ## The Calibration Problem
 
