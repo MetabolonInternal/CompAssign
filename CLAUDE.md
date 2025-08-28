@@ -40,7 +40,7 @@ conda env remove -n compassign
 ```bash
 # Standard training (uses recommended parameters)
 ./scripts/run_training.sh
-# Expected: 99.5% precision, 93.9% recall
+# Expected: High precision with these parameters
 
 # Quick test (100 samples for development)
 ./scripts/run_training.sh --quick
@@ -84,10 +84,10 @@ kill %1  # or use process ID from ps
 
 ### Key Performance Metrics
 
-**Test Results (with default parameters):**
-- **Precision: 99.5%** (only 7 false positives in testing)
-- **Recall: 93.9%** (catches most true compounds)
-- **Training time: ~5 minutes** with 1000 samples
+**Performance with default parameters:**
+- High precision achievable with recommended settings
+- Training time: ~5 minutes with 1000 samples
+- Performance varies with dataset characteristics
 
 The ablation study showed these parameters work well in testing.
 
@@ -145,11 +145,8 @@ output/
 **Production Configuration (Default):**
 - Mass tolerance: 0.005 Da
 - Probability threshold: 0.9
-- **Precision: 99.5%**
-- **Recall: 93.9%**
-- **False Positives: 7**
-
-This configuration performed well in ablation studies.
+- These parameters showed strong performance in ablation studies
+- Actual results will vary with your specific dataset
 
 ## Key Files to Understand the System
 

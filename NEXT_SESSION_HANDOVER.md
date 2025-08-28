@@ -6,21 +6,18 @@ CompAssign is a Bayesian framework for ultra-high precision compound assignment 
 ## Current State (2025-08-28)
 **Status: STABLE AND WORKING** ✅
 - The codebase is now clean, simplified, and fully functional
-- Achieving 99.5% precision with recommended parameters
+- Strong performance with recommended parameters
 - All obsolete code has been removed
 - Documentation has been updated
 
 ## Recent Major Achievements
 
 ### Ablation Study Discovery (2025-08-27)
-Simple parameter tuning achieves better performance than complex architectures:
-- **Precision: 99.5%** (standard model) vs 99.3% (enhanced model)
-- **Recall: 93.9%** (standard model) vs 89.9% (enhanced model)
-- **False Positives: 7** (standard model) vs 9 (enhanced model)
+Simple parameter tuning achieves better performance than complex architectures. The standard model with tuned parameters outperformed the enhanced model in testing.
 
 ### Effective Configuration
 ```python
-# These parameters achieve 99.5% precision:
+# Recommended parameters from ablation study:
 mass_tolerance = 0.005  # Filters 50% of false candidates
 probability_threshold = 0.9  # Conservative decision boundary
 n_chains = None  # Uses PyMC default (4 chains)
@@ -133,24 +130,6 @@ candidates = filter(|mass_diff| < 0.005 AND |rt_diff| < rt_window)
 - Interaction between mass tolerance and RT filtering?
 - Computational cost vs candidate reduction benefit?
 
-## Key Performance Metrics
-
-### With Recommended Parameters
-- **Mass tolerance**: 0.005 Da
-- **Probability threshold**: 0.9
-- **Results**:
-  - Precision: 99.5%
-  - Recall: 93.9%
-  - False Positives: 7
-  - Training time: ~5 minutes
-
-### Parameter Impact Guide
-| Threshold | Precision | Recall | Use Case |
-|-----------|-----------|--------|----------|
-| 0.50 | 92.9% | 98.3% | Discovery |
-| 0.70 | 95.3% | 97.1% | Standard |
-| 0.90 | 99.5% | 93.9% | Production |
-| 0.95 | 99.7% | 89.2% | Ultra-conservative |
 
 ## Technical Notes
 

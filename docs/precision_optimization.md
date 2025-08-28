@@ -86,21 +86,9 @@ PYTHONPATH=. python scripts/train.py \
 - **False Positives: ~50**
 - **Use case**: Novel compound discovery where missing compounds is the primary concern
 
-## Threshold Impact Analysis
+## Threshold Impact
 
-### Precision-Recall Tradeoff
-
-With mass_tolerance fixed at 0.005 Da:
-
-| Threshold | Precision | Recall | F1 Score | FP | FN | Use Case |
-|-----------|-----------|--------|----------|----|----|----------|
-| 0.50 | 92.9% | 98.3% | 0.955 | 11 | 13 | Discovery |
-| 0.60 | 94.1% | 97.8% | 0.959 | 9 | 17 | General |
-| 0.70 | 95.3% | 97.1% | 0.962 | 7 | 23 | Standard |
-| 0.80 | 96.8% | 95.8% | 0.963 | 5 | 33 | High Precision |
-| **0.90** | **99.5%** | **93.9%** | **0.967** | **7** | **48** | **Production** |
-| 0.95 | 99.7% | 89.2% | 0.941 | 4 | 86 | Ultra-Conservative |
-| 0.99 | 99.9% | 76.3% | 0.865 | 1 | 189 | Extreme Precision |
+Higher probability thresholds generally increase precision at the cost of recall. The relationship is non-linear and dataset-dependent. Testing on your specific data is essential to find the right balance.
 
 ## Implementation Strategy
 
