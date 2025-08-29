@@ -21,11 +21,13 @@ NC='\033[0m' # No Color
 
 # Default values (recommended based on testing)
 N_SAMPLES=1000
+N_COMPOUNDS=10     # Fast testing (use 60 for realistic evaluation)
+N_SPECIES=40       # 40 species across 8 clusters (~5 per cluster)
 MASS_TOL=0.005
 RT_WINDOW=1.5
-MATCHING="hungarian"
-THRESHOLD=0.9
-TARGET_ACCEPT=0.99
+MATCHING="greedy"  # Greedy performs better than Hungarian
+THRESHOLD=0.5      # Balanced precision-recall (70% precision, 43% recall)
+TARGET_ACCEPT=0.95  # Standard target accept
 TEST_THRESHOLDS=false
 
 # Parse arguments
@@ -33,19 +35,23 @@ if [[ "$1" == "--help" ]] || [[ "$1" == "-h" ]]; then
     echo "CompAssign Training Runner"
     echo ""
     echo "Usage:"
-    echo "  ./scripts/run_training.sh              # Standard training (1000 samples)"
+    echo "  ./scripts/run_training.sh              # Standard training (10 compounds, 1000 samples)"
     echo "  ./scripts/run_training.sh 500          # Custom sample count"
     echo "  ./scripts/run_training.sh 1000 0.8     # Custom samples and threshold"
     echo "  ./scripts/run_training.sh --quick      # Quick test (100 samples)"
+    echo "  ./scripts/run_training.sh --compounds 30  # Custom compound count"
+    echo "  ./scripts/run_training.sh --species 80    # Custom species count"
     echo "  ./scripts/run_training.sh --test       # Test multiple thresholds"
-    echo "  ./scripts/run_training.sh --greedy     # Use greedy matching instead of Hungarian"
+    echo "  ./scripts/run_training.sh --hungarian  # Use Hungarian matching (optimal 1-to-1)"
     echo "  ./scripts/run_training.sh --no-matching # No one-to-one constraint (high recall)"
     echo ""
     echo "Default parameters (recommended):"
+    echo "  • Compounds: 10 (fast testing, use --compounds 60 for realistic)"
+    echo "  • Species: 40 (across 8 clusters, ~5 per cluster)"
     echo "  • Mass tolerance: 0.005 Da"
     echo "  • RT window: ±1.5σ"
-    echo "  • Matching: Hungarian (optimal one-to-one)"
-    echo "  • Probability threshold: 0.9"
+    echo "  • Matching: Greedy (better performance than Hungarian)"
+    echo "  • Probability threshold: 0.5 (balanced precision-recall)"
     echo ""
     echo "Examples:"
     echo "  # Production training"
@@ -56,6 +62,9 @@ if [[ "$1" == "--help" ]] || [[ "$1" == "-h" ]]; then
     echo ""
     echo "  # Explore precision-recall tradeoff"
     echo "  ./scripts/run_training.sh --test"
+    echo ""
+    echo "  # Realistic evaluation (60 compounds)"
+    echo "  ./scripts/run_training.sh --compounds 60"
     echo ""
     echo "  # Custom threshold for more recall"
     echo "  ./scripts/run_training.sh 1000 0.8"
@@ -69,6 +78,30 @@ if [[ "$1" == "--quick" ]]; then
     shift
 fi
 
+# Custom compound count
+if [[ "$1" == "--compounds" ]]; then
+    shift
+    if [[ -n "$1" ]] && [[ "$1" =~ ^[0-9]+$ ]]; then
+        N_COMPOUNDS=$1
+        echo -e "${YELLOW}Using $N_COMPOUNDS compounds${NC}"
+        shift
+    else
+        echo -e "${YELLOW}Warning: Invalid compound count, using default (10)${NC}"
+    fi
+fi
+
+# Custom species count
+if [[ "$1" == "--species" ]]; then
+    shift
+    if [[ -n "$1" ]] && [[ "$1" =~ ^[0-9]+$ ]]; then
+        N_SPECIES=$1
+        echo -e "${YELLOW}Using $N_SPECIES species${NC}"
+        shift
+    else
+        echo -e "${YELLOW}Warning: Invalid species count, using default (40)${NC}"
+    fi
+fi
+
 # Test thresholds mode
 if [[ "$1" == "--test" ]]; then
     TEST_THRESHOLDS=true
@@ -76,10 +109,17 @@ if [[ "$1" == "--test" ]]; then
     shift
 fi
 
-# Greedy matching mode
+# Greedy matching mode (already default, but kept for clarity)
 if [[ "$1" == "--greedy" ]]; then
     MATCHING="greedy"
     echo -e "${YELLOW}Using greedy matching algorithm${NC}"
+    shift
+fi
+
+# Hungarian matching mode (optimal one-to-one assignment)
+if [[ "$1" == "--hungarian" ]]; then
+    MATCHING="hungarian"
+    echo -e "${YELLOW}Using Hungarian matching algorithm (optimal one-to-one)${NC}"
     shift
 fi
 
@@ -111,7 +151,7 @@ fi
 # Custom threshold
 if [[ -n "$1" ]] && [[ "$1" =~ ^[0-9]*\.?[0-9]+$ ]]; then
     THRESHOLD=$1
-    echo -e "${YELLOW}⚠️  Using custom threshold: $THRESHOLD (default: 0.9)${NC}"
+    echo -e "${YELLOW}⚠️  Using custom threshold: $THRESHOLD (default: 0.5)${NC}"
     shift
 fi
 
@@ -127,6 +167,8 @@ echo -e "${BLUE}       CompAssign Training Pipeline         ${NC}"
 echo -e "${BLUE}============================================${NC}"
 echo ""
 echo "Configuration:"
+echo "  • Compounds: $N_COMPOUNDS"
+echo "  • Species: $N_SPECIES"
 echo "  • Samples: $N_SAMPLES"
 echo "  • Mass tolerance: $MASS_TOL Da"
 echo "  • RT window: ±${RT_WINDOW}σ"
@@ -139,6 +181,8 @@ echo ""
 
 # Build the training command
 CMD="PYTHONPATH=. python scripts/train.py"
+CMD="$CMD --n-compounds $N_COMPOUNDS"
+CMD="$CMD --n-species $N_SPECIES"
 CMD="$CMD --n-samples $N_SAMPLES"
 CMD="$CMD --mass-tolerance $MASS_TOL"
 CMD="$CMD --rt-window-k $RT_WINDOW"

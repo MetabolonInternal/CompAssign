@@ -11,6 +11,7 @@ import pymc as pm
 import arviz as az
 from typing import Dict, Any, Tuple, Optional
 from dataclasses import dataclass
+from scipy.optimize import linear_sum_assignment
 
 
 @dataclass
@@ -193,8 +194,8 @@ class PeakAssignmentModel:
                     n_rt_filtered += 1
                     continue
                 
-                # Log intensity
-                log_intensity = np.log10(intensity) if intensity > 0 else 0
+                # Log intensity (natural log to match data generation)
+                log_intensity = np.log(intensity) if intensity > 0 else 0
                 
                 # Label (1 if true match, 0 otherwise)
                 label = 1 if (true_comp is not None and true_comp == m) else 0
@@ -361,22 +362,59 @@ class PeakAssignmentModel:
             + theta_int_mean * self.logit_df['log_intensity']
         )))
         
-        # Assign each peak to highest-probability compound
+        # Assign peaks to compounds based on matching algorithm
         assignments = {}
         probabilities = {}
         
-        for peak_id, group in self.logit_df.groupby('peak_id'):
-            # Find candidate with max probability
-            idx_max = group['pred_prob'].idxmax()
-            comp_pred = int(group.loc[idx_max, 'compound'])
-            prob_max = group.loc[idx_max, 'pred_prob']
+        if self.matching == 'hungarian':
+            # Create cost matrix for Hungarian algorithm (negative log probabilities)
+            # First, get unique peaks and compounds
+            unique_peaks = self.logit_df['peak_id'].unique()
+            unique_compounds = self.logit_df['compound'].unique()
             
-            if prob_max >= probability_threshold:
-                assignments[peak_id] = comp_pred
-                probabilities[peak_id] = prob_max
-            else:
-                assignments[peak_id] = None
-                probabilities[peak_id] = prob_max
+            # Create probability matrix
+            prob_matrix = np.zeros((len(unique_peaks), len(unique_compounds)))
+            
+            for i, peak_id in enumerate(unique_peaks):
+                peak_candidates = self.logit_df[self.logit_df['peak_id'] == peak_id]
+                for _, row in peak_candidates.iterrows():
+                    j = np.where(unique_compounds == row['compound'])[0][0]
+                    prob_matrix[i, j] = row['pred_prob']
+            
+            # Convert to cost matrix (minimize negative log probability)
+            # Add small epsilon to avoid log(0)
+            cost_matrix = -np.log(prob_matrix + 1e-10)
+            
+            # Apply Hungarian algorithm
+            row_ind, col_ind = linear_sum_assignment(cost_matrix)
+            
+            # Extract assignments that meet threshold
+            for i, j in zip(row_ind, col_ind):
+                peak_id = unique_peaks[i]
+                compound_id = unique_compounds[j]
+                prob = prob_matrix[i, j]
+                
+                if prob >= probability_threshold:
+                    assignments[int(peak_id)] = int(compound_id)
+                    probabilities[int(peak_id)] = prob
+                else:
+                    assignments[int(peak_id)] = None
+                    probabilities[int(peak_id)] = prob
+                    
+        else:  # greedy or none
+            # Original greedy assignment (each peak picks best compound)
+            for peak_id, group in self.logit_df.groupby('peak_id'):
+                # Find candidate with max probability
+                idx_max = group['pred_prob'].idxmax()
+                comp_pred = int(group.loc[idx_max, 'compound'])
+                prob_max = group.loc[idx_max, 'pred_prob']
+                
+                if prob_max >= probability_threshold:
+                    assignments[peak_id] = comp_pred
+                    probabilities[peak_id] = prob_max
+                else:
+                    assignments[peak_id] = None
+                    probabilities[peak_id] = prob_max
         
         # Compute metrics
         TP = FP = FN = TN = 0

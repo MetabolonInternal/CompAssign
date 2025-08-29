@@ -91,14 +91,20 @@ kill %1  # or use process ID from ps
 
 The ablation study showed these parameters work well in testing.
 
-### Key Parameters
-- `--mass-tolerance`: 0.005 Da (effective in testing, filters 50% of false candidates)
+### Key Parameters (Updated based on challenging data testing)
+- `--mass-tolerance`: 0.005 Da (filters 97.7% of false candidates with realistic data)
+- `--rt-window-k`: 1.5 (optimal balance, accepts 87% of normal distribution)
 - `--probability-threshold`: 0.9 (recommended for conservative assignment)
 
-**Alternative Settings (if needed):**
-- Slightly more recall: `--probability-threshold 0.8` (95% precision)
-- Exploration mode: `--probability-threshold 0.7` (90% precision)
-- Research only: Custom values (performance not guaranteed)
+**Performance with Challenging Data (30% isomers, 20% near-isobars):**
+- k=0.5: 81.5% precision, 32.9% recall (too restrictive)
+- k=1.0: 77.9% precision, 56.0% recall (conservative)
+- k=1.5: 76.9% precision, 78.7% recall (balanced) ✓
+- k=2.0: 74.5% precision, 87.4% recall (permissive)
+
+**Important Discovery**: 99% precision is NOT achievable with mass/RT alone when realistic data includes isomers and near-isobars. Maximum achievable precision is ~86% even with ultra-restrictive k=0.1 (which loses 92.5% of true positives).
+
+See `docs/k_parameter_findings.md` and `docs/synthetic_data_generation.md` for details.
 
 ## Architecture and Key Design Decisions
 
