@@ -1,0 +1,44 @@
+name: compassign
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  # Python version
+  - python=3.11
+  
+  # Core scientific computing
+  - numpy=1.26.*
+  - pandas=2.3.*
+  - scipy=1.16.*
+  
+  # Bayesian modeling
+  - pymc=5.25.*
+  - arviz=0.22.*
+  - pytensor=2.31.*
+  
+  # Machine learning
+  - scikit-learn=1.7.*
+  
+  # Visualization
+  - matplotlib=3.10.*
+  - seaborn=0.13.*
+  
+  # Data handling
+  - h5py=3.14.*
+  - netcdf4=1.6.*
+  - xarray=2025.7.*
+  
+  # Development tools
+  - ipython
+  - jupyter
+  - pip
+  
+  # Report generation
+  - tabulate  # For markdown tables in benchmark reports
+  
+  # Optional: Faster sampling (uncomment if needed)
+  # - numpyro  # Requires JAX, may have compatibility issues
+  
+  # pip dependencies (if any packages not available in conda)
+  # - pip:
+  #   - some-package-only-on-pip
