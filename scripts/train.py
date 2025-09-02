@@ -239,14 +239,15 @@ def main():
         internal_std=params['internal_std']
     )
     
-    # Build the model
-    rt_model.build_model(obs_df, params['rt_uncertainties'])
+    # Build the model with correct parameter
+    rt_model.build_model(obs_df, use_non_centered=True)
     
-    # Build sampling kwargs
+    # Build sampling kwargs with improved NUTS settings
     sample_kwargs = {
         'n_samples': args.n_samples,
         'n_tune': args.n_tune,
-        'target_accept': args.target_accept,
+        'target_accept': 0.99,  # Higher target_accept to reduce divergences
+        'max_treedepth': 15,  # Increased tree depth
         'random_seed': args.seed
     }
     if args.n_chains is not None:
@@ -279,42 +280,54 @@ def main():
         rt_window_k=args.rt_window_k,
         use_class_weights=True,  # Balance classes for calibration
         standardize_features=True,  # Prevent extreme logits
-        calibration_method='none'  # No temperature scaling for simplicity
+        calibration_method='temperature'  # Enable temperature scaling for calibrated confidence scores
     )
     
-    # Compute RT predictions
+    # Compute RT predictions with proper predictive uncertainty
     assignment_model.compute_rt_predictions(
         trace_rt,
         params['n_species'],
         len(compound_df),  # Use actual number from generated data
         params['descriptors'],
-        params['internal_std']
+        params['internal_std'],
+        rt_model=rt_model  # Pass RT model for standardization parameters
     )
     
-    # Mark which species-compound pairs were actually observed
-    # This helps the model distinguish between plausible and implausible assignments
-    observed_pairs = set()
-    for _, row in obs_df.iterrows():
-        observed_pairs.add((int(row['species']), int(row['compound'])))
+    # REMOVED: Label leakage block that artificially inflated unobserved pairs
+    # The model should learn from data alone without using ground truth information
     
-    # Adjust RT predictions and uncertainties based on observation status
-    # This is critical since not all species-compound pairs are observed
-    for (s, c), (mean_rt, std_rt) in list(assignment_model.rt_predictions.items()):
-        if (s, c) not in observed_pairs:
-            # For unobserved pairs: increase uncertainty and add random offset
-            # This makes them less likely to be selected
-            offset = np.random.normal(0, 2.0)  # Add random offset to RT
-            assignment_model.rt_predictions[(s, c)] = (mean_rt + offset, std_rt * 5.0)
-    
-    # Generate training data
+    # Generate training data with relaxed RT filter to get more negatives
     logit_df = assignment_model.generate_training_data(
         peak_df,
         params['compound_mass'],
-        len(compound_df)  # Use actual number from generated data
+        len(compound_df),  # Use actual number from generated data
+        apply_rt_filter=False  # Don't filter by RT during training to get more negatives
     )
     
-    # Build and sample model
-    assignment_model.build_model()
+    # Split data into train/calib/test by peak_id for proper evaluation
+    np.random.seed(args.seed)
+    peak_ids = np.array(sorted(logit_df['peak_id'].unique()))
+    np.random.shuffle(peak_ids)
+    n_peaks = len(peak_ids)
+    train_p = int(0.6 * n_peaks)
+    calib_p = int(0.2 * n_peaks)
+    
+    train_peaks = set(peak_ids[:train_p])
+    calib_peaks = set(peak_ids[train_p:train_p + calib_p])
+    test_peaks = set(peak_ids[train_p + calib_p:])
+    
+    idx = np.arange(len(logit_df))
+    train_idx = idx[logit_df['peak_id'].isin(train_peaks)]
+    calib_idx = idx[logit_df['peak_id'].isin(calib_peaks)]
+    test_idx = idx[logit_df['peak_id'].isin(test_peaks)]
+    
+    print_flush(f"\nData split by peak_id:")
+    print_flush(f"  Train: {len(train_peaks)} peaks, {len(train_idx)} examples")
+    print_flush(f"  Calib: {len(calib_peaks)} peaks, {len(calib_idx)} examples")
+    print_flush(f"  Test:  {len(test_peaks)} peaks, {len(test_idx)} examples")
+    
+    # Build and sample model on training data only
+    assignment_model.build_model(train_idx=train_idx)
     # Build sampling kwargs for assignment model
     sample_kwargs_assign = {
         'n_samples': args.n_samples,
@@ -327,11 +340,16 @@ def main():
     
     trace_assignment = assignment_model.sample(**sample_kwargs_assign)
     
+    # Calibrate on held-out calibration set
+    if assignment_model.calibration_method != 'none':
+        assignment_model._calibrate_model(calib_idx=calib_idx)
+    
     # Make predictions
     print_flush("\n5. Making predictions...")
     results = assignment_model.predict_assignments(
         peak_df,
-        probability_threshold=args.probability_threshold
+        probability_threshold=args.probability_threshold,
+        eval_peak_ids=test_peaks  # Evaluate only on test set
     )
     
     # Save assignment results
@@ -367,32 +385,47 @@ def main():
     
     # Create assignment plots
     print_flush("\n7. Creating assignment plots...")
-    # Pass the correct parameters: logit_df, trace, results dict, output_path
+    # Pass the correct parameters: logit_df, trace, results dict, output_path, test_peaks
     assignment_results_dict = {
         'precision': results.precision,
         'recall': results.recall,
         'f1_score': results.f1_score,
         'confusion_matrix': results.confusion_matrix
     }
-    create_assignment_plots(logit_df, trace_assignment, assignment_results_dict, output_path)
+    create_assignment_plots(logit_df, trace_assignment, assignment_results_dict, output_path, test_peaks, args.probability_threshold)
     
     # Test threshold impact if requested
     if args.test_thresholds:
         test_threshold_impact(assignment_model, peak_df, output_path)
     
-    # Final summary
+    # Final summary with sanity checks
     print_flush("\n" + "="*60)
     print_flush("TRAINING COMPLETE")
     print_flush("="*60)
-    print_flush(f"\nPerformance:")
-    print_flush(f"  Precision: {results.precision:.1%}")
-    print_flush(f"  Recall: {results.recall:.1%}")
-    print_flush(f"  False Positives: {results.confusion_matrix['FP']}")
     
-    if args.mass_tolerance != 0.005 or args.probability_threshold != 0.9:
-        print_flush(f"\nParameters used:")
-        print_flush(f"  Mass tolerance: {args.mass_tolerance} Da")
-        print_flush(f"  Probability threshold: {args.probability_threshold}")
+    # Sanity check: Print split sizes again
+    print_flush("\nFinal splits summary:")
+    print_flush(f"  Train examples: {len(train_idx)} ({len(train_peaks)} peaks)")
+    print_flush(f"  Calib examples: {len(calib_idx)} ({len(calib_peaks)} peaks)")
+    print_flush(f"  Test examples: {len(test_idx)} ({len(test_peaks)} peaks)")
+    print_flush(f"  Total candidates: {len(logit_df)}")
+    
+    # Performance summary (test set only)
+    print_flush(f"\nTest-set performance:")
+    print_flush(f"  Precision: {results.precision:.3f} ({results.precision:.1%})")
+    print_flush(f"  Recall:    {results.recall:.3f} ({results.recall:.1%})")
+    print_flush(f"  F1:        {results.f1_score:.3f}")
+    print_flush(f"  ECE:       {results.calibration_metrics['ece']:.3f}")
+    print_flush(f"  MCE:       {results.calibration_metrics['mce']:.3f}")
+    print_flush(f"  False Positives: {results.confusion_matrix['FP']}")
+    print_flush(f"  True Positives:  {results.confusion_matrix['TP']}")
+    
+    # Parameters summary
+    print_flush(f"\nParameters used:")
+    print_flush(f"  Mass tolerance: {args.mass_tolerance} Da")
+    print_flush(f"  RT window: ±{args.rt_window_k}σ (relaxed during training)")
+    print_flush(f"  Probability threshold: {args.probability_threshold}")
+    print_flush(f"  Calibration method: {assignment_model.calibration_method}")
     
     print_flush(f"\nOutput directory: {output_path}/")
 

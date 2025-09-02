@@ -15,7 +15,7 @@ NC='\033[0m' # No Color
 # Default parameters
 N_COMPOUNDS=10
 N_SPECIES=40
-N_SAMPLES=1000
+N_SAMPLES=1000  # Default to 1000 samples for reasonable runtime
 MASS_TOLERANCE=0.005
 RT_WINDOW_K=1.5
 PROBABILITY_THRESHOLD=0.7
@@ -32,10 +32,9 @@ while [[ $# -gt 0 ]]; do
             N_SAMPLES=500
             shift
             ;;
-        --full)
-            echo -e "${YELLOW}Running in full mode (2000 samples)${NC}"
-            N_SAMPLES=2000
-            shift
+        --samples)
+            N_SAMPLES="$2"
+            shift 2
             ;;
         --compounds)
             N_COMPOUNDS="$2"
@@ -54,15 +53,16 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  --quick           Run with 500 samples (faster)"
-            echo "  --full            Run with 2000 samples (slower, more accurate)"
+            echo "  --samples N       Number of MCMC samples (default: 1000)"
             echo "  --compounds N     Number of compounds (default: 10)"
             echo "  --species N       Number of species (default: 40)"
             echo "  --output DIR      Output directory (default: output)"
             echo "  --help            Show this help message"
             echo ""
             echo "Examples:"
-            echo "  $0                # Run with defaults"
-            echo "  $0 --quick        # Quick test run"
+            echo "  $0                # Run with defaults (1000 samples)"
+            echo "  $0 --quick        # Quick test run (500 samples)"
+            echo "  $0 --samples 2000 # Run with more samples"
             echo "  $0 --compounds 20 --species 100  # Larger dataset"
             exit 0
             ;;

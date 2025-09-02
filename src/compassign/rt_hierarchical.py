@@ -86,6 +86,15 @@ class HierarchicalRTModel:
         species_idx = obs_df['species'].values.astype(int)
         compound_idx = obs_df['compound'].values.astype(int)
         
+        # Standardize covariates to improve sampling and reduce divergences
+        self._desc_mean = self.descriptors.mean(axis=0)
+        self._desc_std = self.descriptors.std(axis=0) + 1e-8
+        desc_std = (self.descriptors - self._desc_mean) / self._desc_std
+        
+        self._is_mean = self.internal_std.mean()
+        self._is_std = self.internal_std.std() + 1e-8
+        is_std = (self.internal_std - self._is_mean) / self._is_std
+        
         with pm.Model() as model:
             # Hyperpriors for random effect standard deviations
             # Use more informative priors based on typical RT ranges
@@ -96,49 +105,71 @@ class HierarchicalRTModel:
             sigma_y = pm.Exponential('sigma_y', 2.0)
             
             if use_non_centered:
-                # Non-centered parameterization (better for sampling)
+                # Non-centered parameterization with sum-to-zero constraints
                 # Cluster effects
                 cluster_raw = pm.Normal('cluster_raw', 0.0, 1.0, shape=self.n_clusters)
-                cluster_eff = pm.Deterministic('cluster_eff', cluster_raw * sigma_cluster)
+                cluster_eff_raw = cluster_raw * sigma_cluster
+                # Sum-to-zero constraint to deconfound from intercept
+                cluster_eff = pm.Deterministic('cluster_eff', 
+                                             cluster_eff_raw - pm.math.mean(cluster_eff_raw))
                 
                 # Class effects
                 class_raw = pm.Normal('class_raw', 0.0, 1.0, shape=self.n_classes)
-                class_eff = pm.Deterministic('class_eff', class_raw * sigma_class)
+                class_eff_raw = class_raw * sigma_class
+                # Sum-to-zero constraint
+                class_eff = pm.Deterministic('class_eff', 
+                                            class_eff_raw - pm.math.mean(class_eff_raw))
                 
                 # Species effects (hierarchical)
                 species_raw = pm.Normal('species_raw', 0.0, 1.0, shape=self.n_species)
+                species_base = cluster_eff[self.species_cluster] + species_raw * sigma_species
+                # Sum-to-zero constraint
                 species_eff = pm.Deterministic('species_eff', 
-                                              cluster_eff[self.species_cluster] + species_raw * sigma_species)
+                                              species_base - pm.math.mean(species_base))
                 
                 # Compound effects (hierarchical)
                 compound_raw = pm.Normal('compound_raw', 0.0, 1.0, shape=self.n_compounds)
+                compound_base = class_eff[self.compound_class] + compound_raw * sigma_compound
+                # Sum-to-zero constraint
                 compound_eff = pm.Deterministic('compound_eff',
-                                               class_eff[self.compound_class] + compound_raw * sigma_compound)
+                                               compound_base - pm.math.mean(compound_base))
             else:
-                # Centered parameterization (original)
-                cluster_eff = pm.Normal('cluster_eff', 0.0, sigma_cluster, shape=self.n_clusters)
-                class_eff = pm.Normal('class_eff', 0.0, sigma_class, shape=self.n_classes)
+                # Centered parameterization with sum-to-zero constraints
+                cluster_eff_raw = pm.Normal('cluster_eff_raw', 0.0, sigma_cluster, shape=self.n_clusters)
+                cluster_eff = pm.Deterministic('cluster_eff', 
+                                              cluster_eff_raw - pm.math.mean(cluster_eff_raw))
                 
-                species_eff = pm.Normal('species_eff', 
-                                      mu=cluster_eff[self.species_cluster], 
-                                      sigma=sigma_species, 
-                                      shape=self.n_species)
-                compound_eff = pm.Normal('compound_eff', 
-                                       mu=class_eff[self.compound_class], 
-                                       sigma=sigma_compound, 
-                                       shape=self.n_compounds)
+                class_eff_raw = pm.Normal('class_eff_raw', 0.0, sigma_class, shape=self.n_classes)
+                class_eff = pm.Deterministic('class_eff', 
+                                            class_eff_raw - pm.math.mean(class_eff_raw))
+                
+                species_base = pm.Normal('species_base', 
+                                        mu=cluster_eff[self.species_cluster], 
+                                        sigma=sigma_species, 
+                                        shape=self.n_species)
+                species_eff = pm.Deterministic('species_eff', 
+                                              species_base - pm.math.mean(species_base))
+                
+                compound_base = pm.Normal('compound_base', 
+                                         mu=class_eff[self.compound_class], 
+                                         sigma=sigma_compound, 
+                                         shape=self.n_compounds)
+                compound_eff = pm.Deterministic('compound_eff',
+                                               compound_base - pm.math.mean(compound_base))
             
             # Global intercept and regression coefficients
-            mu0 = pm.Normal('mu0', 5.0, 2.0)  # Prior centered at typical RT value
-            beta = pm.Normal('beta', 0.0, 2.0, shape=self.descriptors.shape[1])
-            gamma = pm.Normal('gamma', 1.0, 0.5)  # coefficient for internal standard (tighter prior)
+            # Center intercept at empirical mean of RT since response is not standardized
+            mu0 = pm.Normal('mu0', float(obs_df['rt'].mean()), 5.0)  # Prior centered at empirical mean
+            beta = pm.Normal('beta', 0.0, 1.0, shape=desc_std.shape[1])  # Tighter prior for standardized features
+            gamma = pm.Normal('gamma', 0.0, 1.0)  # Standardized coefficient
             
             # Expected retention time for each observation
+            # Use standardized covariates
             rt_mean = (mu0 
                       + species_eff[species_idx] 
                       + compound_eff[compound_idx] 
-                      + pm.math.dot(self.descriptors[compound_idx], beta) 
-                      + gamma * self.internal_std[species_idx])
+                      + pm.math.dot(desc_std[compound_idx], beta) 
+                      + gamma * is_std[species_idx])
             
             # Likelihood
             y_obs = pm.Normal('y_obs', mu=rt_mean, sigma=sigma_y, observed=obs_df['rt'].values)
@@ -150,8 +181,8 @@ class HierarchicalRTModel:
                n_samples: int = 1000, 
                n_tune: int = 1000, 
                n_chains: int = None,
-               target_accept: float = 0.95,
-               max_treedepth: int = 12,
+               target_accept: float = 0.99,
+               max_treedepth: int = 15,
                random_seed: int = 42,
                init: str = 'adapt_diag') -> az.InferenceData:
         """
@@ -338,6 +369,10 @@ class HierarchicalRTModel:
             species_eff = species_eff[idx]
             compound_eff = compound_eff[idx]
         
+        # Standardize covariates using the same parameters from build_model
+        desc_std = (self.descriptors[compound_idx] - self._desc_mean) / self._desc_std
+        is_std = (self.internal_std[species_idx] - self._is_mean) / self._is_std
+        
         # Compute predictions for each posterior sample
         n_pred = len(species_idx)
         n_samples_used = len(mu0)
@@ -347,8 +382,8 @@ class HierarchicalRTModel:
             pred = (mu0[i] 
                    + species_eff[i, species_idx]
                    + compound_eff[i, compound_idx]
-                   + np.dot(self.descriptors[compound_idx], beta[i])
-                   + gamma[i] * self.internal_std[species_idx])
+                   + np.dot(desc_std, beta[i])
+                   + gamma[i] * is_std)
             predictions[i] = pred
         
         pred_mean = predictions.mean(axis=0)

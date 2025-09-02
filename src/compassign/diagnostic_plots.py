@@ -272,15 +272,20 @@ def plot_residuals(ppc_results: Dict[str, Any], plots_path: Path):
     
     # 4. ACF of residuals
     ax = axes[1, 1]
-    from statsmodels.tsa.stattools import acf
-    acf_values = acf(ppc_results['residuals'], nlags=20)
-    ax.bar(range(len(acf_values)), acf_values)
-    ax.axhline(0, color='black')
-    ax.axhline(1.96/np.sqrt(len(ppc_results['residuals'])), color='red', linestyle='--', alpha=0.5)
-    ax.axhline(-1.96/np.sqrt(len(ppc_results['residuals'])), color='red', linestyle='--', alpha=0.5)
-    ax.set_xlabel('Lag')
-    ax.set_ylabel('ACF')
-    ax.set_title('Residual Autocorrelation')
+    try:
+        from statsmodels.tsa.stattools import acf
+        acf_values = acf(ppc_results['residuals'], nlags=20)
+        ax.bar(range(len(acf_values)), acf_values)
+        ax.axhline(0, color='black')
+        ax.axhline(1.96/np.sqrt(len(ppc_results['residuals'])), color='red', linestyle='--', alpha=0.5)
+        ax.axhline(-1.96/np.sqrt(len(ppc_results['residuals'])), color='red', linestyle='--', alpha=0.5)
+        ax.set_xlabel('Lag')
+        ax.set_ylabel('ACF')
+        ax.set_title('Residual Autocorrelation')
+    except ImportError:
+        ax.text(0.5, 0.5, 'statsmodels not installed\nACF plot unavailable', 
+               transform=ax.transAxes, ha='center', va='center')
+        ax.set_title('Residual Autocorrelation (unavailable)')
     
     plt.suptitle("Residual Diagnostics", fontsize=14)
     plt.tight_layout()

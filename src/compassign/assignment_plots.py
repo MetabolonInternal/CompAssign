@@ -17,10 +17,21 @@ import warnings
 warnings.filterwarnings('ignore')
 
 
+def _val(obj, key, default=None):
+    """Helper to get value from either dict or dataclass."""
+    if hasattr(obj, key):
+        return getattr(obj, key)
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return default
+
+
 def create_assignment_plots(logit_df: pd.DataFrame,
                            assignment_trace: az.InferenceData,
                            assignment_results: Dict[str, Any],
-                           output_path: Path):
+                           output_path: Path,
+                           test_peak_ids: Optional[set] = None,
+                           threshold: float = 0.5):
     """
     Create all plots for the peak assignment model.
     
@@ -34,63 +45,114 @@ def create_assignment_plots(logit_df: pd.DataFrame,
         Assignment results including confusion matrix
     output_path : Path
         Directory to save plots
+    test_peak_ids : Optional[set]
+        Set of peak IDs to use for test-set-only plotting
+    threshold : float
+        Probability threshold used for assignments (default: 0.5)
     """
     plots_path = output_path / "plots" / "assignment_model"
     plots_path.mkdir(parents=True, exist_ok=True)
     
     print("\nGenerating assignment model plots...")
     
+    # Filter to test set if provided
+    if test_peak_ids is not None:
+        logit_df_eval = logit_df[logit_df['peak_id'].isin(test_peak_ids)].copy()
+        print(f"  Filtering plots to {len(test_peak_ids)} test peaks")
+    else:
+        logit_df_eval = logit_df
+    
     # 1. Logistic coefficient posterior distributions
-    plot_logistic_coefficients(assignment_trace, plots_path)
+    # Extract feature names from the data used for training
+    feature_names_list = [c for c in logit_df_eval.columns 
+                         if c not in ['peak_id', 'species', 'compound', 'label', 
+                                     'raw_prob', 'calibrated_prob', 'pred_prob']]
+    plot_logistic_coefficients(assignment_trace, plots_path, feature_names_list)
     
     # 2. Feature distributions by class
-    plot_feature_distributions(logit_df, plots_path)
+    plot_feature_distributions(logit_df_eval, plots_path)
     
     # 3. ROC and Precision-Recall curves
-    plot_roc_pr_curves(logit_df, plots_path)
+    plot_roc_pr_curves(logit_df_eval, plots_path)
     
     # 4. Probability calibration plot
-    plot_probability_calibration(logit_df, plots_path)
+    plot_probability_calibration(logit_df_eval, plots_path, threshold)
     
     # 5. Confusion matrix heatmap
     plot_confusion_matrix(assignment_results, plots_path)
     
     # 6. Feature importance and correlations
-    plot_feature_importance(assignment_trace, logit_df, plots_path)
+    plot_feature_importance(assignment_trace, logit_df_eval, plots_path)
     
     print(f"Assignment plots saved to: {plots_path}")
 
 
-def plot_logistic_coefficients(trace: az.InferenceData, plots_path: Path):
+def plot_logistic_coefficients(trace: az.InferenceData, plots_path: Path, feature_names: Optional[list] = None):
     """Plot posterior distributions of logistic regression coefficients."""
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
-    
-    # Coefficient names and labels
-    coef_names = ['theta0', 'theta_mass', 'theta_rt', 'theta_int']
-    coef_labels = ['Intercept', 'Mass Error (ppm)', 'RT Z-score', 'Log Intensity']
-    
-    for idx, (name, label) in enumerate(zip(coef_names, coef_labels)):
-        ax = axes[idx // 2, idx % 2]
+    # Check what variables are available
+    if 'theta_features' in trace.posterior:
+        # New model with feature vector
+        n_features = trace.posterior['theta_features'].shape[-1]
+        # Plot intercept and top 3 most important features
+        n_plots = min(4, n_features + 1)
+        fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+        axes = axes.flatten()
         
-        if name in trace.posterior:
-            # Get posterior samples
-            samples = trace.posterior[name].values.flatten()
-            
-            # Plot distribution
+        # Plot intercept
+        if 'theta0' in trace.posterior:
+            ax = axes[0]
+            samples = trace.posterior['theta0'].values.flatten()
             ax.hist(samples, bins=30, alpha=0.7, density=True, edgecolor='black')
             ax.axvline(0, color='red', linestyle='--', alpha=0.5, label='Zero')
             ax.axvline(np.mean(samples), color='green', linewidth=2, 
                       label=f'Mean: {np.mean(samples):.3f}')
-            
-            # Add 95% HDI
-            hdi = az.hdi(trace, var_names=[name], hdi_prob=0.95)
-            hdi_vals = hdi[name].values
-            ax.axvspan(hdi_vals[0], hdi_vals[1], alpha=0.2, color='blue',
-                      label=f'95% HDI: [{hdi_vals[0]:.3f}, {hdi_vals[1]:.3f}]')
-            
-            ax.set_xlabel(label)
+            ax.set_xlabel('Intercept')
             ax.set_ylabel('Density')
-            ax.set_title(f'Posterior: {label}')
+            ax.set_title('Posterior: Intercept')
+            ax.legend()
+        
+        # Get feature importances and plot top 3
+        feature_samples = trace.posterior['theta_features'].values
+        if len(feature_samples.shape) == 3:
+            n_chains, n_draws, n_features = feature_samples.shape
+            feature_samples = feature_samples.reshape(n_chains * n_draws, n_features)
+        
+        means = np.mean(feature_samples, axis=0)
+        importance_idx = np.argsort(np.abs(means))[::-1][:3]
+        
+        # Use provided names or fall back to generic labels
+        if feature_names is None:
+            feature_names = [f'Feature {i}' for i in range(feature_samples.shape[1])]
+        
+        for i, feat_idx in enumerate(importance_idx):
+            ax = axes[i + 1]
+            samples = feature_samples[:, feat_idx]
+            feat_name = feature_names[feat_idx] if feat_idx < len(feature_names) else f'Feature {feat_idx}'
+            
+            ax.hist(samples, bins=30, alpha=0.7, density=True, edgecolor='black')
+            ax.axvline(0, color='red', linestyle='--', alpha=0.5, label='Zero')
+            ax.axvline(np.mean(samples), color='green', linewidth=2, 
+                      label=f'Mean: {np.mean(samples):.3f}')
+            ax.set_xlabel(feat_name.replace('_', ' ').title())
+            ax.set_ylabel('Density')
+            ax.set_title(f'Posterior: {feat_name.replace("_", " ").title()}')
+            ax.legend()
+        
+        # Hide unused axes
+        for i in range(n_plots, 4):
+            axes[i].set_visible(False)
+    else:
+        # Old model structure (fallback)
+        fig, ax = plt.subplots(1, 1, figsize=(8, 6))
+        if 'theta0' in trace.posterior:
+            samples = trace.posterior['theta0'].values.flatten()
+            ax.hist(samples, bins=30, alpha=0.7, density=True, edgecolor='black')
+            ax.axvline(0, color='red', linestyle='--', alpha=0.5, label='Zero')
+            ax.axvline(np.mean(samples), color='green', linewidth=2, 
+                      label=f'Mean: {np.mean(samples):.3f}')
+            ax.set_xlabel('Intercept')
+            ax.set_ylabel('Density')
+            ax.set_title('Posterior: Intercept')
             ax.legend()
     
     plt.suptitle('Logistic Model Coefficient Posteriors', fontsize=14)
@@ -233,7 +295,7 @@ def plot_roc_pr_curves(logit_df: pd.DataFrame, plots_path: Path):
     plt.close()
 
 
-def plot_probability_calibration(logit_df: pd.DataFrame, plots_path: Path):
+def plot_probability_calibration(logit_df: pd.DataFrame, plots_path: Path, threshold: float = 0.5):
     """Plot probability calibration and distribution."""
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     
@@ -250,7 +312,14 @@ def plot_probability_calibration(logit_df: pd.DataFrame, plots_path: Path):
     counts = []
     
     for i in range(n_bins):
-        mask = (logit_df['pred_prob'] >= bin_edges[i]) & (logit_df['pred_prob'] < bin_edges[i+1])
+        # Include boundaries to not drop p=0 or p=1
+        if i == 0:
+            mask = (logit_df['pred_prob'] >= bin_edges[i]) & (logit_df['pred_prob'] < bin_edges[i+1])
+        elif i == n_bins - 1:
+            mask = (logit_df['pred_prob'] >= bin_edges[i]) & (logit_df['pred_prob'] <= bin_edges[i+1])
+        else:
+            mask = (logit_df['pred_prob'] >= bin_edges[i]) & (logit_df['pred_prob'] < bin_edges[i+1])
+            
         if mask.sum() > 0:
             true_freq.append(logit_df.loc[mask, 'label'].mean())
             pred_freq.append(logit_df.loc[mask, 'pred_prob'].mean())
@@ -294,7 +363,7 @@ def plot_probability_calibration(logit_df: pd.DataFrame, plots_path: Path):
     ax.hist(prob_false, bins=20, alpha=0.6, label='False candidates', 
             color='red', density=True)
     
-    ax.axvline(0.5, color='black', linestyle='--', label='Threshold = 0.5')
+    ax.axvline(threshold, color='black', linestyle='--', label=f'Threshold = {threshold}')
     ax.set_xlabel('Predicted Probability')
     ax.set_ylabel('Density')
     ax.set_title('Probability Distributions by True Class')
@@ -311,19 +380,19 @@ def plot_confusion_matrix(assignment_results: Dict[str, Any], plots_path: Path):
     """Plot confusion matrix as a heatmap."""
     fig, ax = plt.subplots(figsize=(8, 6))
     
-    # Extract confusion matrix values
-    cm = assignment_results.get('confusion_matrix', assignment_results.get('assignment_confusion', {}))
+    # Extract confusion matrix values (handles both dict and dataclass)
+    cm = _val(assignment_results, 'confusion_matrix', {}) or _val(assignment_results, 'assignment_confusion', {})
     
     # Handle missing keys
-    if 'TP' not in cm:
+    if not cm or 'TP' not in cm:
         print("Warning: Confusion matrix not available, skipping plot")
         plt.close()
         return
     
-    # Create matrix
+    # Create matrix (rows=predicted, columns=actual)
     conf_matrix = np.array([
-        [cm['TP'], cm['FN']],
-        [cm['FP'], cm['TN']]
+        [cm['TP'], cm['FP']],  # Predicted: Assigned
+        [cm['FN'], cm['TN']]   # Predicted: Not Assigned
     ])
     
     # Labels
@@ -339,13 +408,13 @@ def plot_confusion_matrix(assignment_results: Dict[str, Any], plots_path: Path):
     ax.set_ylabel('Predicted', fontsize=12)
     ax.set_title('Peak Assignment Confusion Matrix', fontsize=14)
     
-    # Add metrics as text
-    precision = assignment_results.get('assignment_precision', 
-                                      cm['TP'] / (cm['TP'] + cm['FP']) if (cm['TP'] + cm['FP']) > 0 else 0)
-    recall = assignment_results.get('assignment_recall',
-                                   cm['TP'] / (cm['TP'] + cm['FN']) if (cm['TP'] + cm['FN']) > 0 else 0)
-    f1 = assignment_results.get('assignment_f1',
-                               2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0)
+    # Add metrics as text (handles both dict and dataclass)
+    precision = _val(assignment_results, 'precision',
+                     cm['TP'] / (cm['TP'] + cm['FP']) if (cm['TP'] + cm['FP']) > 0 else 0)
+    recall = _val(assignment_results, 'recall',
+                  cm['TP'] / (cm['TP'] + cm['FN']) if (cm['TP'] + cm['FN']) > 0 else 0)
+    f1 = _val(assignment_results, 'f1_score',
+              2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0)
     
     metrics_text = f'Precision: {precision:.3f}\nRecall: {recall:.3f}\nF1 Score: {f1:.3f}'
     ax.text(1.5, -0.15, metrics_text, transform=ax.transAxes,
@@ -575,7 +644,8 @@ def create_performance_comparison_plots(obs_df: pd.DataFrame,
         merged['log_intensity'] = np.log10(merged['intensity'])
         bins = np.percentile(merged['log_intensity'], [0, 25, 50, 75, 100])
         merged['intensity_bin'] = pd.cut(merged['log_intensity'], bins, 
-                                        labels=['Low', 'Medium', 'High', 'Very High'])
+                                        labels=['Low', 'Medium', 'High', 'Very High'],
+                                        duplicates='drop')
         
         # Calculate success rate per bin
         success_rates = []
@@ -626,9 +696,9 @@ def create_performance_comparison_plots(obs_df: pd.DataFrame,
     • 95% Coverage: {ppc_results['coverage_95']*100:.1f}%
     
     Peak Assignment Performance:
-    • Precision: {assignment_results.get('assignment_precision', 0):.3f}
-    • Recall: {assignment_results.get('assignment_recall', 0):.3f}
-    • F1 Score: {assignment_results.get('assignment_f1', 0):.3f}
+    • Precision: {_val(assignment_results, 'precision', 0):.3f}
+    • Recall: {_val(assignment_results, 'recall', 0):.3f}
+    • F1 Score: {_val(assignment_results, 'f1_score', 0):.3f}
     
     Data Statistics:
     • Total RT observations: {len(obs_df)}
