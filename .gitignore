@@ -46,3 +46,9 @@ output/models/*
 output/results/*.json
 !output/results/.gitkeep
 output
+
+# Generated visualizations and validation outputs
+plots/
+validation_results.json
+validation_results.json.backup.*
+validation_output.log

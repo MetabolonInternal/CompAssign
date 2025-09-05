@@ -17,23 +17,17 @@ conda activate compassign
 ## Quick Start
 
 ```bash
-# Fast sanity run (fewer MCMC samples)
-./scripts/run_training.sh --quick
+# Active learning validation (recommended entrypoint)
+./scripts/run_validation.sh -v   # or omit -v for quiet mode
 
-# Full run (more samples; slower)
-./scripts/run_training.sh --full
-
-# Two-stage control (debugging/experiments)
-./scripts/run_two_stage.sh --stage both|1|2 [--quick]
-
-# Direct python entrypoint
-python scripts/train.py --help
+# Optional: visualize results (uses validation_results.json)
+python scripts/visualize_validation_results.py --input validation_results.json
 ```
 
 ## Project Structure
 
-- `src/compassign/`: Core library (RT model, peak assignment, plots, generators)
-- `scripts/`: Entrypoints (`train.py`, `train_two_stage.py`, `run_training.sh`, `run_two_stage.sh`)
+- `src/compassign/`: Core library (RT model, softmax assignment, AL harness, generator)
+- `scripts/`: Entrypoints (`run_validation.sh`, `validate_active_learning_complete.py`, `setup_environment.sh`, `visualize_validation_results.py`)
 - `docs/`: Model specs and references (see `docs/bayesian_models.md`)
 - `output/`: Generated artifacts (git‑ignored)
 - Root: `environment.yml`, `pyproject.toml`, `AGENTS.md`

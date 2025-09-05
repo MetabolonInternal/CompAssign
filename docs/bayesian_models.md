@@ -172,3 +172,66 @@ After computing calibrated probabilities for all candidate pairs:
 3. **Probability threshold**: Accept if \$P(y\_{pc}=1) \ge \tau\_p\$ with a **meaningful default** \$\tau\_p = 0.5\$ (due to probability calibration).
 
 A greedy matching ensures each peak is assigned to at most one compound, choosing the highest probability above threshold.
+
+## 4. Softmax Assignment Model with Null Class
+
+The softmax variant enforces exclusivity constraints directly and includes explicit null assignments for unmatched peaks.
+
+### 4.1 Model Specification
+
+For each peak $i$ with candidate set $C_i$ (compounds passing mass filter), we model assignment as a categorical distribution over $K_i + 1$ classes (candidates plus null):
+
+```math
+p(y_i = k | \mathbf{X}_i, \boldsymbol{\theta}) = \frac{\exp(\eta_{ik} / T)}{\sum_{j=0}^{K_i} \exp(\eta_{ij} / T)}
+```
+
+where the logits are:
+
+```math
+\eta_{i0} = \theta_{\text{null}} + \log \pi_{\text{null}}
+```
+
+```math
+\eta_{ik} = \theta_0 + \boldsymbol{\theta}^\top \mathbf{x}_{ik} + \log \pi_{s(i),c_k} \quad \text{for } k > 0
+```
+
+Here:
+- $k = 0$ represents the null class (no compound assigned)
+- $\mathbf{x}_{ik}$ are the 9 features for peak $i$ and candidate $c_k$
+- $\pi_{sc}$ is the prior probability that compound $c$ occurs in species $s$
+- $T$ is a temperature parameter for calibration
+
+### 4.2 Compound Presence Priors
+
+We maintain Beta-Bernoulli priors for compound presence:
+
+```math
+\pi_{sc} \sim \text{Beta}(\alpha_{sc}, \beta_{sc})
+```
+
+Initially $\alpha_{sc} = \beta_{sc} = 1$ (uniform). These are updated online:
+- Positive annotation: $\alpha_{sc} \leftarrow \alpha_{sc} + 1$
+- Negative annotation: $\beta_{sc} \leftarrow \beta_{sc} + 1$
+
+### 4.3 Key Advantages
+
+1. **Exclusivity**: Softmax ensures exactly one assignment per peak
+2. **Null handling**: Explicit modeling of unmatched peaks
+3. **Online learning**: Presence priors update with human feedback
+4. **Calibration**: Temperature scaling provides in-model calibration
+
+### 4.4 Implementation Details
+
+- **Ragged to padded**: Variable candidate counts handled via masking
+- **Numerical stability**: Invalid slots masked with $\eta = -10^9$
+- **Temperature prior**: $\log T \sim \mathcal{N}(0, 0.5)$ ensures $T > 0$
+
+## 5. Active Learning Integration
+
+The softmax model supports precision-focused active learning via expected false positive reduction:
+
+```math
+A_{\text{FP}}(i) = \mathbb{I}[q_i^{\max} \geq \tau] \cdot (1 - q_i^{\max})
+```
+
+where $q_i^{\max} = \max_k p(y_i = k)$ is the top probability for peak $i$.
