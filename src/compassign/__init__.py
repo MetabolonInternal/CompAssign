@@ -11,6 +11,7 @@ __author__ = "Metabolon CompAssign Team"
 from .rt_hierarchical import HierarchicalRTModel
 from .peak_assignment import PeakAssignmentModel
 from .peak_assignment_softmax import PeakAssignmentSoftmaxModel, SoftmaxAssignmentResults
+from .pymc_generative_assignment import GenerativeAssignmentModel, GenerativeAssignmentResults
 from .presence_prior import PresencePrior
 from .oracles import (
     Oracle, OptimalOracle, RandomOracle, NoisyOracle,
@@ -27,6 +28,8 @@ __all__ = [
     "PeakAssignmentModel",
     "PeakAssignmentSoftmaxModel",
     "SoftmaxAssignmentResults",
+    "GenerativeAssignmentModel",
+    "GenerativeAssignmentResults",
     "PresencePrior",
     "Oracle",
     "OptimalOracle",

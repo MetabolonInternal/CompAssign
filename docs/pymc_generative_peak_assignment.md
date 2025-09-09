@@ -314,3 +314,100 @@ The current softmax is a pragmatic, fast, and surprisingly effective multiclass 
 - δ_s: species RT drift; σ_m, σ_rt: measurement scales; ν_m, ν_rt: degrees of freedom
 - r[i,k]: responsibility (posterior P(z_i=k | data, params))
 
+
+---
+
+## 12) Implementation Status (Phase 1)
+
+This repository now includes a working Phase 1 implementation wired into scripts and evaluation loops.
+
+- Core module: `src/compassign/pymc_generative_assignment.py`
+  - Class: `GenerativeAssignmentModel`
+  - Key methods:
+    - `compute_rt_predictions(trace_rt, n_species, n_compounds, descriptors, internal_std, rt_model=None)`:
+      builds `(species, compound) -> (mean, std)` predictive RT dict from the existing RT hierarchical model posterior (proper predictive variance).
+    - `generate_training_data(peak_df, compound_mass, n_compounds, ...)`:
+      builds padded `(N, K_max)` tensors with a null slot (k=0), masks, observations, and candidate indices.
+    - `build_model()`:
+      creates the PyMC model: logistic–normal presence prior + Student‑T mass/RT likelihoods + null background; marginalizes with `logsumexp` via a `pm.Potential`.
+    - `sample(draws, tune, chains, target_accept, max_treedepth, ...)`:
+      runs NUTS with default safe settings.
+    - `predict_probs()`:
+      returns posterior‑mean responsibilities `r̄[i,k]` (falls back to prior‑mode heuristic if no trace is present).
+    - `assign(prob_threshold, eval_peak_ids=None)`:
+      produces assignments, calibration metrics (ECE/MCE), and classification metrics.
+
+- Integration points updated:
+  - Training: `scripts/train.py` now accepts `--model {calibrated|softmax|generative}`.
+    - Generative path: computes RT predictions using the trained RT model; builds tensors; uses train split labels (supervised) while evaluating on a held‑out test set; saves `models/assignment_trace.nc` and `results/peak_assignments.csv` + `assignment_metrics.json`.
+  - Eval loop: `src/compassign/eval_loop.py` supports both softmax (`p`) and generative (`r`). Presence updates are optional (skipped if not available).
+  - CLI wrapper: `scripts/run_training.sh` forwards `--model` to the training script.
+
+Notes on null/background:
+- Phase 1 uses a broad Student‑T × Student‑T background for the null slot (centered at empirical medians). This is stable and simple; it can be refined in later phases.
+
+---
+
+## 13) How to Run
+
+Environment
+- Conda: `conda env create -f environment.yml && conda activate compassign`
+- Or: `source scripts/setup_environment.sh`
+- If pytest is missing: `pip install pytest` inside the environment.
+
+Quick sanity run (uses fewer draws)
+- `./scripts/run_training.sh --quick --model generative`
+
+Fuller run
+- `./scripts/run_training.sh --samples 1000 --model generative`
+
+Direct usage
+- `python scripts/train.py --help`
+- Example: `python scripts/train.py --n-compounds 10 --n-species 40 --n-samples 750 --model generative --probability-threshold 0.7`
+
+Outputs (under `output/`)
+- `models/assignment_trace.nc`: InferenceData for the generative assignment model
+- `results/peak_assignments.csv`: per‑peak assignment and probability
+- `results/assignment_metrics.json`: precision, recall, F1, confusion matrix, settings
+
+---
+
+## 14) Systematic Test & Evaluation Plan
+
+Unit tests (fast)
+- Location: `tests/test_pymc_generative_assignment.py`
+- Run: `pytest -q -k generative`
+- Validates:
+  - Shape/masking correctness of `(N, K_max)` tensors with a valid null slot
+  - Prior‑mode `predict_probs()` returns normalized responsibilities
+  - On an easy synthetic set, most true peaks get assigned; noise peaks default to null
+
+Sampling sanity (optional)
+- Use a tiny dataset in the script pipeline; run with `--quick` and verify:
+  - Convergence for core parameters (R‑hat ~ 1.0 for `alpha`, `a_s`, `b_c`, `sigma_m`, `sigma_rt`)
+  - Responsibilities are non‑degenerate and sum to 1 on valid slots
+
+Evaluation metrics
+- Inspect `output/results/assignment_metrics.json`:
+  - `precision`, `recall`, `f1_score`
+  - `confusion_matrix`
+- Calibration quality from `assign()`: `ece`, `mce`
+
+Active learning (optional)
+- `src/compassign/eval_loop.py` works with generative models:
+  - Uses posterior mean responsibilities (`r`) and minimal features for diversity
+  - Presence prior updates are skipped if model doesn’t expose them
+  - Expect entropy and expected‑FP to decrease after refits
+
+Performance expectations
+- Generative: minutes (vectorized, no discrete z); scale draws and `target_accept` as needed.
+- Use modest `draws`/`tune` for quick validation; increase for higher fidelity.
+
+---
+
+## 15) Future Phases (Roadmap)
+
+- Phase 1.1: Replace constant‑centered null with improved background after inspecting residuals.
+- Phase 2: Move RT means inside the generative model via hierarchical regression, or consume full posterior of the existing RT model by sampling `μ_c` per draw.
+- Phase 3: Add intensity/shape terms and simple adduct/isotope offsets in the mass mean.
+- Phase 4: Non‑centered parameterizations across all hierarchies; profiling; batch‑wise processing if needed.

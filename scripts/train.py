@@ -17,6 +17,8 @@ from datetime import datetime
 
 from src.compassign.rt_hierarchical import HierarchicalRTModel
 from src.compassign.peak_assignment import PeakAssignmentModel
+from src.compassign.peak_assignment_softmax import PeakAssignmentSoftmaxModel
+from src.compassign.pymc_generative_assignment import GenerativeAssignmentModel
 from src.compassign.diagnostic_plots import create_all_diagnostic_plots
 from src.compassign.assignment_plots import create_assignment_plots
 
@@ -73,6 +75,8 @@ def parse_args():
                        help='One-to-one matching algorithm (default: greedy)')
     parser.add_argument('--test-thresholds', action='store_true',
                        help='Test multiple probability thresholds')
+    parser.add_argument('--model', type=str, default='calibrated', choices=['calibrated', 'softmax', 'generative'],
+                       help='Assignment model to run')
     
     # Output parameters
     parser.add_argument('--output-dir', type=str, default='output',
@@ -270,133 +274,225 @@ def main():
     
     # Train peak assignment model
     print_flush("\n4. Training peak assignment model...")
+    print_flush(f"   Model: {args.model}")
     print_flush(f"   Mass tolerance: {args.mass_tolerance} Da")
     print_flush(f"   RT window: ±{args.rt_window_k}σ")
     print_flush(f"   Matching algorithm: {args.matching}")
     print_flush(f"   Probability threshold: {args.probability_threshold}")
-    
-    assignment_model = PeakAssignmentModel(
-        mass_tolerance=args.mass_tolerance,
-        rt_window_k=args.rt_window_k,
-        use_class_weights=True,  # Balance classes for calibration
-        standardize_features=True,  # Prevent extreme logits
-        calibration_method='temperature'  # Enable temperature scaling for calibrated confidence scores
-    )
-    
-    # Compute RT predictions with proper predictive uncertainty
-    assignment_model.compute_rt_predictions(
-        trace_rt,
-        params['n_species'],
-        len(compound_df),  # Use actual number from generated data
-        params['descriptors'],
-        params['internal_std'],
-        rt_model=rt_model  # Pass RT model for standardization parameters
-    )
-    
-    # REMOVED: Label leakage block that artificially inflated unobserved pairs
-    # The model should learn from data alone without using ground truth information
-    
-    # Generate training data with relaxed RT filter to get more negatives
-    logit_df = assignment_model.generate_training_data(
-        peak_df,
-        params['compound_mass'],
-        len(compound_df),  # Use actual number from generated data
-        apply_rt_filter=False  # Don't filter by RT during training to get more negatives
-    )
-    
-    # Split data into train/calib/test by peak_id for proper evaluation
-    np.random.seed(args.seed)
-    peak_ids = np.array(sorted(logit_df['peak_id'].unique()))
-    np.random.shuffle(peak_ids)
-    n_peaks = len(peak_ids)
-    train_p = int(0.6 * n_peaks)
-    calib_p = int(0.2 * n_peaks)
-    
-    train_peaks = set(peak_ids[:train_p])
-    calib_peaks = set(peak_ids[train_p:train_p + calib_p])
-    test_peaks = set(peak_ids[train_p + calib_p:])
-    
-    idx = np.arange(len(logit_df))
-    train_idx = idx[logit_df['peak_id'].isin(train_peaks)]
-    calib_idx = idx[logit_df['peak_id'].isin(calib_peaks)]
-    test_idx = idx[logit_df['peak_id'].isin(test_peaks)]
-    
-    print_flush(f"\nData split by peak_id:")
-    print_flush(f"  Train: {len(train_peaks)} peaks, {len(train_idx)} examples")
-    print_flush(f"  Calib: {len(calib_peaks)} peaks, {len(calib_idx)} examples")
-    print_flush(f"  Test:  {len(test_peaks)} peaks, {len(test_idx)} examples")
-    
-    # Build and sample model on training data only
-    assignment_model.build_model(train_idx=train_idx)
-    # Build sampling kwargs for assignment model
-    sample_kwargs_assign = {
-        'n_samples': args.n_samples,
-        'n_tune': args.n_tune,
-        'target_accept': args.target_accept,
-        'random_seed': args.seed
-    }
-    if args.n_chains is not None:
-        sample_kwargs_assign['n_chains'] = args.n_chains
-    
-    trace_assignment = assignment_model.sample(**sample_kwargs_assign)
-    
-    # Calibrate on held-out calibration set
-    if assignment_model.calibration_method != 'none':
-        assignment_model._calibrate_model(calib_idx=calib_idx)
-    
-    # Make predictions
-    print_flush("\n5. Making predictions...")
-    results = assignment_model.predict_assignments(
-        peak_df,
-        probability_threshold=args.probability_threshold,
-        eval_peak_ids=test_peaks  # Evaluate only on test set
-    )
-    
-    # Save assignment results
-    logit_df.to_csv(output_path / "data" / "logit_training_data.csv", index=False)
-    trace_assignment.to_netcdf(output_path / "models" / "assignment_trace.nc")
-    
-    # Save predictions
-    assignment_df = pd.DataFrame([
-        {
-            'peak_id': peak_id,
-            'assigned_compound': results.assignments[peak_id],
-            'probability': results.probabilities[peak_id]
+
+    if args.model == 'generative':
+        # Generative model pipeline
+        gen_model = GenerativeAssignmentModel(
+            mass_tolerance=args.mass_tolerance,
+            rt_window_k=args.rt_window_k,
+            random_seed=args.seed,
+        )
+
+        # Compute RT predictions (mean, std) for species-compound pairs
+        gen_model.compute_rt_predictions(
+            trace_rt,
+            params['n_species'],
+            len(compound_df),
+            params['descriptors'],
+            params['internal_std'],
+            rt_model=rt_model,
+        )
+
+        # Generate padded tensors and labels
+        train_pack = gen_model.generate_training_data(
+            peak_df=peak_df,
+            compound_mass=params['compound_mass'],
+            n_compounds=len(compound_df),
+        )
+
+        # Split by peak_id (train/calib/test) for evaluation parity
+        np.random.seed(args.seed)
+        peak_ids = np.array(sorted(train_pack['peak_ids']))
+        np.random.shuffle(peak_ids)
+        n_peaks = len(peak_ids)
+        train_p = int(0.6 * n_peaks)
+        calib_p = int(0.2 * n_peaks)
+        train_peaks = set(map(int, peak_ids[:train_p]))
+        calib_peaks = set(map(int, peak_ids[train_p:train_p + calib_p]))
+        test_peaks = set(map(int, peak_ids[train_p + calib_p:]))
+
+        # Use labels only for train set
+        labels = gen_model.train_pack['labels']
+        true_labels = gen_model.train_pack['true_labels']
+        peak_id_array = gen_model.train_pack['peak_ids']
+        labels[:] = -1
+        for i, pid in enumerate(peak_id_array):
+            if int(pid) in train_peaks:
+                labels[i] = true_labels[i]
+
+        # Build and sample
+        gen_model.build_model()
+        sample_kwargs_assign = {
+            'draws': args.n_samples,
+            'tune': args.n_tune,
+            'target_accept': args.target_accept,
+            'random_seed': args.seed,
         }
-        for peak_id in results.assignments.keys()
-    ])
-    assignment_df.to_csv(output_path / "results" / "peak_assignments.csv", index=False)
-    
-    # Save metrics
-    metrics = {
-        'timestamp': datetime.now().isoformat(),
-        'mass_tolerance': args.mass_tolerance,
-        'rt_window_k': args.rt_window_k,
-        'matching': args.matching,
-        'probability_threshold': args.probability_threshold,
-        'precision': results.precision,
-        'recall': results.recall,
-        'f1_score': results.f1_score,
-        'confusion_matrix': results.confusion_matrix
-    }
-    
-    with open(output_path / "results" / "assignment_metrics.json", 'w') as f:
-        json.dump(metrics, f, indent=2)
-    
-    # Create assignment plots
-    print_flush("\n7. Creating assignment plots...")
-    # Pass the correct parameters: logit_df, trace, results dict, output_path, test_peaks
-    assignment_results_dict = {
-        'precision': results.precision,
-        'recall': results.recall,
-        'f1_score': results.f1_score,
-        'confusion_matrix': results.confusion_matrix
-    }
-    create_assignment_plots(logit_df, trace_assignment, assignment_results_dict, output_path, test_peaks, args.probability_threshold)
-    
-    # Test threshold impact if requested
-    if args.test_thresholds:
-        test_threshold_impact(assignment_model, peak_df, output_path)
+        if args.n_chains is not None:
+            sample_kwargs_assign['chains'] = args.n_chains
+        trace_assignment = gen_model.sample(**sample_kwargs_assign)
+
+        # Predictions and metrics (test set only)
+        print_flush("\n5. Making predictions (generative)...")
+        results = gen_model.assign(prob_threshold=args.probability_threshold, eval_peak_ids=test_peaks)
+
+        # Save outputs
+        trace_assignment.to_netcdf(output_path / "models" / "assignment_trace.nc")
+        probs_dict = gen_model.predict_probs()
+        assignment_df = pd.DataFrame([
+            {
+                'peak_id': pid,
+                'assigned_compound': results.assignments.get(int(pid)),
+                'probability': results.top_prob.get(int(pid), 0.0)
+            }
+            for pid in peak_id_array
+        ])
+        assignment_df.to_csv(output_path / "results" / "peak_assignments.csv", index=False)
+
+        metrics = {
+            'timestamp': datetime.now().isoformat(),
+            'model': 'generative',
+            'mass_tolerance': args.mass_tolerance,
+            'rt_window_k': args.rt_window_k,
+            'matching': args.matching,
+            'probability_threshold': args.probability_threshold,
+            'precision': results.precision,
+            'recall': results.recall,
+            'f1_score': results.f1,
+            'confusion_matrix': results.confusion_matrix,
+        }
+        with open(output_path / "results" / "assignment_metrics.json", 'w') as f:
+            json.dump(metrics, f, indent=2)
+
+    elif args.model == 'softmax':
+        # Keep path available for softmax model if desired
+        softmax_model = PeakAssignmentSoftmaxModel(
+            mass_tolerance=args.mass_tolerance,
+            rt_window_k=args.rt_window_k,
+            use_temperature=True,
+            standardize_features=True,
+            random_seed=args.seed,
+        )
+        softmax_model.compute_rt_predictions(
+            trace_rt,
+            params['n_species'],
+            len(compound_df),
+            params['descriptors'],
+            params['internal_std'],
+            rt_model=rt_model,
+        )
+        n_species = len(np.unique(peak_df['species']))
+        softmax_model.generate_training_data(
+            peak_df=peak_df,
+            compound_mass=params['compound_mass'],
+            n_compounds=len(compound_df),
+            species_cluster=peak_df['species'].values,
+        )
+        softmax_model.build_model()
+        trace_assignment = softmax_model.sample(draws=args.n_samples, tune=args.n_tune, chains=args.n_chains or 2,
+                                               target_accept=args.target_accept)
+        results = softmax_model.assign(prob_threshold=args.probability_threshold)
+        trace_assignment.to_netcdf(output_path / "models" / "assignment_trace.nc")
+
+    else:
+        # Original calibrated logistic pipeline
+        assignment_model = PeakAssignmentModel(
+            mass_tolerance=args.mass_tolerance,
+            rt_window_k=args.rt_window_k,
+            use_class_weights=True,
+            standardize_features=True,
+            calibration_method='temperature'
+        )
+        assignment_model.compute_rt_predictions(
+            trace_rt,
+            params['n_species'],
+            len(compound_df),
+            params['descriptors'],
+            params['internal_std'],
+            rt_model=rt_model
+        )
+        logit_df = assignment_model.generate_training_data(
+            peak_df,
+            params['compound_mass'],
+            len(compound_df),
+            apply_rt_filter=False
+        )
+        np.random.seed(args.seed)
+        peak_ids = np.array(sorted(logit_df['peak_id'].unique()))
+        np.random.shuffle(peak_ids)
+        n_peaks = len(peak_ids)
+        train_p = int(0.6 * n_peaks)
+        calib_p = int(0.2 * n_peaks)
+        train_peaks = set(peak_ids[:train_p])
+        calib_peaks = set(peak_ids[train_p:train_p + calib_p])
+        test_peaks = set(peak_ids[train_p + calib_p:])
+
+        idx = np.arange(len(logit_df))
+        train_idx = idx[logit_df['peak_id'].isin(train_peaks)]
+        calib_idx = idx[logit_df['peak_id'].isin(calib_peaks)]
+        test_idx = idx[logit_df['peak_id'].isin(test_peaks)]
+        print_flush(f"\nData split by peak_id:")
+        print_flush(f"  Train: {len(train_peaks)} peaks, {len(train_idx)} examples")
+        print_flush(f"  Calib: {len(calib_peaks)} peaks, {len(calib_idx)} examples")
+        print_flush(f"  Test:  {len(test_peaks)} peaks, {len(test_idx)} examples")
+
+        assignment_model.build_model(train_idx=train_idx)
+        sample_kwargs_assign = {
+            'n_samples': args.n_samples,
+            'n_tune': args.n_tune,
+            'target_accept': args.target_accept,
+            'random_seed': args.seed
+        }
+        if args.n_chains is not None:
+            sample_kwargs_assign['n_chains'] = args.n_chains
+        trace_assignment = assignment_model.sample(**sample_kwargs_assign)
+        if assignment_model.calibration_method != 'none':
+            assignment_model._calibrate_model(calib_idx=calib_idx)
+        print_flush("\n5. Making predictions...")
+        results = assignment_model.predict_assignments(
+            peak_df,
+            probability_threshold=args.probability_threshold,
+            eval_peak_ids=test_peaks
+        )
+        logit_df.to_csv(output_path / "data" / "logit_training_data.csv", index=False)
+        trace_assignment.to_netcdf(output_path / "models" / "assignment_trace.nc")
+        assignment_df = pd.DataFrame([
+            {
+                'peak_id': peak_id,
+                'assigned_compound': results.assignments[peak_id],
+                'probability': results.probabilities[peak_id]
+            }
+            for peak_id in results.assignments.keys()
+        ])
+        assignment_df.to_csv(output_path / "results" / "peak_assignments.csv", index=False)
+        metrics = {
+            'timestamp': datetime.now().isoformat(),
+            'mass_tolerance': args.mass_tolerance,
+            'rt_window_k': args.rt_window_k,
+            'matching': args.matching,
+            'probability_threshold': args.probability_threshold,
+            'precision': results.precision,
+            'recall': results.recall,
+            'f1_score': results.f1_score,
+            'confusion_matrix': results.confusion_matrix
+        }
+        with open(output_path / "results" / "assignment_metrics.json", 'w') as f:
+            json.dump(metrics, f, indent=2)
+        print_flush("\n7. Creating assignment plots...")
+        assignment_results_dict = {
+            'precision': results.precision,
+            'recall': results.recall,
+            'f1_score': results.f1_score,
+            'confusion_matrix': results.confusion_matrix
+        }
+        create_assignment_plots(logit_df, trace_assignment, assignment_results_dict, output_path, test_peaks, args.probability_threshold)
+        if args.test_thresholds:
+            test_threshold_impact(assignment_model, peak_df, output_path)
     
     # Final summary with sanity checks
     print_flush("\n" + "="*60)

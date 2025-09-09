@@ -84,7 +84,7 @@ def calculate_expected_fp(probs_dict: Dict[int, np.ndarray],
 
 
 def simulate_annotation_round(
-    softmax_model: PeakAssignmentSoftmaxModel,
+    softmax_model: Any,
     oracle: Oracle,
     batch_peak_ids: List[int],
     peak_df: pd.DataFrame,
@@ -203,21 +203,19 @@ def simulate_annotation_round(
         labeled_peaks.append(peak_id)
         labels_provided.append(label)
         
-        # Update presence prior based on label
-        if label == 0:
-            # Null assignment
-            softmax_model.presence.update_null()
-        else:
-            # Compound assignment
-            compound_idx = candidate_map[label]
-            softmax_model.presence.update_positive(species_idx, compound_idx, weight=1.0)
-            softmax_model.presence.update_not_null()
-            
-            # Light negatives for other candidates of this peak
-            for k in range(1, len(candidate_map)):
-                c_alt = candidate_map[k]
-                if c_alt is not None and c_alt != compound_idx:
-                    softmax_model.presence.update_negative(species_idx, c_alt, weight=0.25)
+        # Update presence prior if available (softmax). Generative model may not have it.
+        if hasattr(softmax_model, 'presence') and softmax_model.presence is not None:
+            if label == 0:
+                softmax_model.presence.update_null()
+            else:
+                compound_idx = candidate_map[label]
+                softmax_model.presence.update_positive(species_idx, compound_idx, weight=1.0)
+                softmax_model.presence.update_not_null()
+                # Light negatives for other candidates of this peak
+                for k in range(1, len(candidate_map)):
+                    c_alt = candidate_map[k]
+                    if c_alt is not None and c_alt != compound_idx:
+                        softmax_model.presence.update_negative(species_idx, c_alt, weight=0.25)
             
             # Store RT observation for potential RT model update
             rt_observations.append({
@@ -283,7 +281,7 @@ def simulate_annotation_round(
 
 
 def run_annotation_experiment(
-    softmax_model: PeakAssignmentSoftmaxModel,
+    softmax_model: Any,
     oracle: Oracle,
     peak_df: pd.DataFrame,
     compound_mass: np.ndarray,
@@ -344,8 +342,21 @@ def run_annotation_experiment(
         mask = softmax_model.train_pack['mask']  # (N, Kmax)
         peak_ids_array = softmax_model.train_pack['peak_ids']
         
-        # Get posterior mean probabilities
-        p_mean = softmax_model.trace.posterior['p'].values.mean(axis=(0,1))  # (N, Kmax)
+        # Get posterior mean probabilities; support 'r' (generative) or 'p' (softmax)
+        p_mean = None
+        if hasattr(softmax_model, 'trace') and softmax_model.trace is not None:
+            post = softmax_model.trace.posterior
+            if 'r' in post:
+                p_mean = post['r'].values.mean(axis=(0,1))
+            elif 'p' in post:
+                p_mean = post['p'].values.mean(axis=(0,1))
+        if p_mean is None:
+            probs_dict = softmax_model.predict_probs()
+            p_mean = np.zeros_like(mask, dtype=float)
+            for i, pid in enumerate(peak_ids_array):
+                vec = probs_dict.get(int(pid))
+                if vec is not None and len(vec) == mask.shape[1]:
+                    p_mean[i] = vec
         
         features_dict = {}
         for i, pid in enumerate(peak_ids_array):
