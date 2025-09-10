@@ -636,7 +636,7 @@ class PeakAssignmentSoftmaxModel:
         
         return out
     
-    def assign(self, prob_threshold: float = 0.5) -> SoftmaxAssignmentResults:
+    def assign(self, prob_threshold: float = 0.5, eval_peak_ids: Optional[set] = None) -> SoftmaxAssignmentResults:
         """
         Assign compounds to peaks based on softmax probabilities.
         
@@ -681,7 +681,7 @@ class PeakAssignmentSoftmaxModel:
                 # Either null or below threshold
                 assignments[peak_id] = None
         
-        # Calculate metrics
+        # Calculate metrics (optionally on evaluation subset)
         true_labels = self.train_pack.get('true_labels', self.train_pack['labels'])
         peak_ids = self.train_pack['peak_ids']
         row_to_candidates = self.train_pack['row_to_candidates']
@@ -690,7 +690,10 @@ class PeakAssignmentSoftmaxModel:
         all_probs = []
         all_correct = []
         
+        eval_set = set(map(int, eval_peak_ids)) if eval_peak_ids is not None else set(map(int, peak_ids))
         for i, (peak_id, label) in enumerate(zip(peak_ids, true_labels)):
+            if int(peak_id) not in eval_set:
+                continue
             if label < 0:
                 continue  # Skip filtered peaks
             

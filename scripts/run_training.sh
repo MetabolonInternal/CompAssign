@@ -23,7 +23,6 @@ MATCHING="greedy"
 TARGET_ACCEPT=0.95
 OUTPUT_DIR="output"
 SEED=42
-MODEL="calibrated"
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -49,10 +48,6 @@ while [[ $# -gt 0 ]]; do
             OUTPUT_DIR="$2"
             shift 2
             ;;
-        --model)
-            MODEL="$2"
-            shift 2
-            ;;
         --help)
             echo "Usage: $0 [OPTIONS]"
             echo ""
@@ -62,7 +57,6 @@ while [[ $# -gt 0 ]]; do
             echo "  --compounds N     Number of compounds (default: 10)"
             echo "  --species N       Number of species (default: 40)"
             echo "  --output DIR      Output directory (default: output)"
-            echo "  --model M         Assignment model: calibrated|softmax|generative (default: calibrated)"
             echo "  --help            Show this help message"
             echo ""
             echo "Examples:"
@@ -121,6 +115,7 @@ main() {
     echo "  • RT window: ±${RT_WINDOW_K}σ"
     echo "  • Matching: ${MATCHING}"
     echo "  • Probability threshold: ${PROBABILITY_THRESHOLD}"
+    echo "  • Model: Softmax (Bayesian)"
     echo ""
     echo -e "${BLUE}============================================${NC}"
     echo ""
@@ -140,7 +135,6 @@ main() {
     CMD="${CMD} --target-accept ${TARGET_ACCEPT}"
     CMD="${CMD} --output-dir ${OUTPUT_DIR}"
     CMD="${CMD} --seed ${SEED}"
-    CMD="${CMD} --model ${MODEL}"
     
     # Print command for reproducibility
     echo -e "${YELLOW}Starting training...${NC}"
