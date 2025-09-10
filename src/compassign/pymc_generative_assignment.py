@@ -300,6 +300,8 @@ class GenerativeAssignmentModel:
         n_compounds = int(self.train_pack["n_compounds"])
         N = X.shape[0]
         K_max = X.shape[1]
+        
+        print(f"  Data shapes: N={N}, K_max={K_max}, n_compounds={n_compounds}")
 
         # Prepare predicted RT means for candidates aligned with comp_idx
         # Create arrays of shape (N, K_max) for rt_pred_mean and rt_pred_std
@@ -349,45 +351,52 @@ class GenerativeAssignmentModel:
             rt_sigma_pred_t = pm.Data("rt_sigma_pred", rt_sigma_pred)
             compound_mass_t = pm.Data("compound_mass", compound_mass)
 
+            # Build presence logits and likelihoods with clone() to avoid stalling
+            import pytensor.tensor as pt
+            
             # Build presence logits per slot
             wlog = pm.math.ones((N, K_max)) * (-1e9)
             # Null slot logits
-            wlog = pm.math.set_subtensor(wlog[:, 0], alpha_null)
-
+            wlog = pt.set_subtensor(wlog[:, 0], alpha_null)
+            
+            # Use clone() to break graph dependencies - this is the key fix
+            wlog = wlog.clone()
+            
             # Candidates
-            # Gather species and compound effects for each (i,k)
-            # Make index arrays for valid candidate slots
-            valid = mask.astype("int8")
-            # Flatten indices
             ii, kk = np.where(mask & (comp_idx >= 0))
-            # For PyTensor advanced indexing, we need them as shared Data or constants
-            ii_t = pm.Data("ii", ii)
-            kk_t = pm.Data("kk", kk)
-            sp_for_slot = species_t[ii_t]
-            comp_for_slot = comp_idx_t[ii_t, kk_t]
-            cand_logits = alpha + a_s[sp_for_slot] + b_c[comp_for_slot]
-            # Scatter back into wlog for candidate positions
-            wlog = pm.math.set_subtensor(wlog[ii_t, kk_t], cand_logits)
-
+            if len(ii) > 0:
+                # For PyTensor advanced indexing
+                ii_t = pm.Data("ii", ii)
+                kk_t = pm.Data("kk", kk)
+                sp_for_slot = species_t[ii_t]
+                comp_for_slot = comp_idx_t[ii_t, kk_t]
+                cand_logits = alpha + a_s[sp_for_slot] + b_c[comp_for_slot]
+                wlog = pt.set_subtensor(wlog[ii_t, kk_t], cand_logits)
+            
             # Build log-likelihood per slot
             loglik = pm.math.zeros((N, K_max)) + (-1e9)
-
-            # Candidate mass log-lik
-            cand_mass_mu = compound_mass_t[comp_for_slot]
-            cand_mass_obs = mass_obs_t[ii_t, kk_t]
-            mass_ll_cand = pm.logp(pm.StudentT.dist(nu_m, mu=cand_mass_mu, sigma=sigma_m), cand_mass_obs)
-
-            # Candidate RT log-lik
-            rt_mu_slot = rt_mu_pred_t[ii_t, kk_t] + delta_s[sp_for_slot]
-            rt_obs_slot = rt_obs_t[ii_t, kk_t]
-            rt_sd_slot = pm.math.maximum(rt_sigma_pred_t[ii_t, kk_t], 1e-2)
-            # Combine model sigma with predicted sigma (quadrature)
-            rt_sigma_eff = pm.math.sqrt(rt_sd_slot**2 + sigma_rt**2)
-            rt_ll_cand = pm.logp(pm.StudentT.dist(nu_rt, mu=rt_mu_slot, sigma=rt_sigma_eff), rt_obs_slot)
-
-            cand_ll = mass_ll_cand + rt_ll_cand
-            loglik = pm.math.set_subtensor(loglik[ii_t, kk_t], cand_ll)
-
+            
+            if len(ii) > 0:
+                # Clone to break dependencies
+                loglik = loglik.clone()
+                # Candidate mass log-lik
+                cand_mass_mu = compound_mass_t[comp_for_slot]
+                cand_mass_obs = mass_obs_t[ii_t, kk_t]
+                mass_ll_cand = pm.logp(pm.StudentT.dist(nu_m, mu=cand_mass_mu, sigma=sigma_m), cand_mass_obs)
+                
+                # Candidate RT log-lik
+                rt_mu_slot = rt_mu_pred_t[ii_t, kk_t] + delta_s[sp_for_slot]
+                rt_obs_slot = rt_obs_t[ii_t, kk_t]
+                rt_sd_slot = pm.math.maximum(rt_sigma_pred_t[ii_t, kk_t], 1e-2)
+                rt_sigma_eff = pm.math.sqrt(rt_sd_slot**2 + sigma_rt**2)
+                rt_ll_cand = pm.logp(pm.StudentT.dist(nu_rt, mu=rt_mu_slot, sigma=rt_sigma_eff), rt_obs_slot)
+                
+                cand_ll = mass_ll_cand + rt_ll_cand
+                loglik = pt.set_subtensor(loglik[ii_t, kk_t], cand_ll)
+            
+            # Clone again before null likelihood
+            loglik = loglik.clone()
+            
             # Null log-likelihood per slot (k=0)
             mass_ll_null = pm.logp(
                 pm.StudentT.dist(nu_null, mu=mass_null_mu, sigma=sigma_m_null), mass_obs_t[:, 0]
@@ -396,17 +405,17 @@ class GenerativeAssignmentModel:
                 pm.StudentT.dist(nu_null, mu=rt_null_mu, sigma=sigma_rt_null), rt_obs_t[:, 0]
             )
             null_ll = mass_ll_null + rt_ll_null
-            loglik = pm.math.set_subtensor(loglik[:, 0], null_ll)
-
+            loglik = pt.set_subtensor(loglik[:, 0], null_ll)
+            
             # Mask invalid slots
             very_neg = -1e9
             wlog_masked = pm.math.where(mask_t, wlog, very_neg)
             loglik_masked = pm.math.where(mask_t, loglik, very_neg)
-
+            
             # Marginalize over assignments per peak
             total = pm.math.logsumexp(wlog_masked + loglik_masked, axis=1)
             pm.Potential("mixture_ll", pm.math.sum(total))
-
+            
             # Deterministic responsibilities
             r = pm.Deterministic("r", pm.math.softmax(wlog_masked + loglik_masked, axis=1))
 
@@ -417,6 +426,7 @@ class GenerativeAssignmentModel:
                 r_train = r[train_idx]
                 pm.Categorical("y", p=r_train, observed=y_obs)
 
+        print("  Model built successfully!")
         self.model = model
         return model
 
