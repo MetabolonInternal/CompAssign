@@ -22,7 +22,8 @@ def create_metabolomics_data(
     isomer_fraction: float = 0.3,
     near_isobar_fraction: float = 0.2,
     mass_error_std: float = 0.002,
-    rt_uncertainty_range: Tuple[float, float] = (0.05, 0.5)
+    rt_uncertainty_range: Tuple[float, float] = (0.05, 0.5),
+    decoy_fraction: float = 0.5  # Fraction of compounds that are decoys (never present)
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict, Dict, Dict]:
     """
     Create synthetic metabolomics data with hierarchical structure.
@@ -71,9 +72,18 @@ def create_metabolomics_data(
     # Assign compounds to chemical classes
     compound_class = np.random.choice(n_classes, size=n_compounds)
     
-    # Generate compound library
+    # Generate compound library with clustered masses for more overlaps
     compounds = []
-    base_masses = np.random.uniform(100, 800, n_compounds)
+    # Create mass clusters to increase density and overlaps
+    n_mass_clusters = max(3, n_compounds // 10)
+    cluster_centers = np.random.uniform(200, 600, n_mass_clusters)
+    base_masses = []
+    for i in range(n_compounds):
+        cluster = np.random.choice(n_mass_clusters)
+        # Masses clustered within ±50 Da of cluster centers
+        mass = cluster_centers[cluster] + np.random.uniform(-50, 50)
+        base_masses.append(mass)
+    base_masses = np.array(base_masses)
     base_rts = np.random.uniform(1, 15, n_compounds)
     
     # Create isomers (same mass, different RT)
@@ -90,14 +100,18 @@ def create_metabolomics_data(
             if len(isomer_groups) > 0:
                 group_id = np.random.choice(len(isomer_groups))
                 base_masses[i] = isomer_groups[group_id]
-                base_rts[i] = base_rts[group_id % n_compounds] + np.random.normal(0, 2.0)
+                # MUCH closer RTs for isomers - often hard to separate
+                base_rts[i] = base_rts[group_id % n_compounds] + np.random.normal(0, 0.3)
     
-    # Create near-isobars (similar mass within tolerance)
+    # Create near-isobars (similar mass AND RT to create maximum confusion)
     n_near_isobars = int(n_compounds * near_isobar_fraction)
     for i in range(n_isomers, n_isomers + n_near_isobars):
         # Find a nearby compound
         ref_idx = np.random.choice(i)
-        base_masses[i] = base_masses[ref_idx] + np.random.uniform(-0.05, 0.05)
+        # Very close mass - often within instrument precision
+        base_masses[i] = base_masses[ref_idx] + np.random.uniform(-0.005, 0.005)
+        # Also similar RT! (near-isobars often have similar chemistry)
+        base_rts[i] = base_rts[ref_idx] + np.random.normal(0, 0.5)
     
     # Build compound dataframe
     compound_df = pd.DataFrame({
@@ -110,24 +124,39 @@ def create_metabolomics_data(
         'class': compound_class
     })
     
-    # Generate RT uncertainties
-    rt_uncertainties = {
-        i: np.random.uniform(*rt_uncertainty_range) 
-        for i in range(n_compounds)
-    }
+    # Generate RT uncertainties AND add systematic RT prediction errors
+    rt_uncertainties = {}
+    rt_prediction_errors = {}
+    for i in range(n_compounds):
+        # Higher base uncertainty
+        rt_uncertainties[i] = np.random.uniform(*rt_uncertainty_range)
+        # Add systematic prediction bias (RT model is imperfect!)
+        rt_prediction_errors[i] = np.random.normal(0, 1.0)  # ±1 minute typical error
+    
+    # Apply RT prediction errors to the "predicted" RTs
+    for i in range(n_compounds):
+        compound_df.loc[i, 'predicted_rt'] += rt_prediction_errors[i]
     
     # Generate peaks
     peaks = []
     peak_id = 0
     true_assignments = {}
     
+    # Mark decoy compounds (will NEVER appear in samples)
+    n_decoys = int(n_compounds * decoy_fraction)
+    decoy_compounds = set(np.random.choice(n_compounds, size=n_decoys, replace=False))
+    real_compounds = set(range(n_compounds)) - decoy_compounds
+    
+    # Add decoy flag to compound dataframe
+    compound_df['is_decoy'] = [i in decoy_compounds for i in range(n_compounds)]
+    
     # Generate real peaks
     for species in range(n_species):
-        # Compounds present in this species (with some missing)
-        presence_prob = 0.65  # 65% of compounds are present
+        # Only select from non-decoy compounds
+        presence_prob = 0.4  # Back to reasonable presence for non-decoys
         present_compounds = np.random.choice(
-            n_compounds, 
-            size=int(n_compounds * presence_prob),
+            list(real_compounds), 
+            size=min(len(real_compounds), int(len(real_compounds) * presence_prob)),
             replace=False
         )
         

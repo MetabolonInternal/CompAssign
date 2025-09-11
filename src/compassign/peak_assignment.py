@@ -1,10 +1,15 @@
 """
-Peak assignment model using softmax with null class and presence priors.
+Simplified Bayesian peak assignment model for publication.
 
-This module implements a Bayesian softmax model for peak-to-compound assignment
-that enforces exclusivity constraints (one compound per peak), includes a null
-option for unmatched peaks, and incorporates compound presence priors that can
-be updated online from human feedback.
+This module implements a cleaner, more theoretically grounded Bayesian softmax model
+with minimal features, hierarchical uncertainty (instead of temperature), and
+presence priors for active learning.
+
+Key simplifications:
+1. Minimal feature set (4-5 features only)
+2. Hierarchical Normal uncertainty instead of temperature scaling
+3. Clean mathematical formulation for publication
+4. Maintains presence priors for active learning capability
 """
 
 import numpy as np
@@ -13,46 +18,75 @@ import pymc as pm
 import arviz as az
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, List, Tuple
+from collections import defaultdict
 from sklearn.preprocessing import StandardScaler
-from sklearn.isotonic import IsotonicRegression
 
 from .presence_prior import PresencePrior
 
 
 @dataclass
-class SoftmaxAssignmentResults:
-    """Container for softmax peak assignment results."""
+class AssignmentResults:
+    """Container for peak assignment results with many-to-one support."""
     assignments: Dict[int, Optional[int]]  # peak_id -> compound_id or None
     top_prob: Dict[int, float]  # peak_id -> max probability
     per_peak_probs: Dict[int, np.ndarray]  # peak_id -> [p_null, p_c1, ...]
-    precision: float
-    recall: float
-    f1: float
+    
+    # Peak-level metrics (many-to-one aware)
+    precision: float  # Peak-level precision
+    recall: float  # Peak-level recall
+    f1: float  # Peak-level F1
     confusion_matrix: Dict[str, int]  # TP, FP, TN, FN
+    
+    # Compound-level metrics (PRIMARY)
+    compound_precision: float  # What fraction of predicted compounds are correct?
+    compound_recall: float  # What fraction of true compounds were found?
+    compound_f1: float  # Harmonic mean of compound P/R
+    compound_metrics: Dict[str, Any]  # Additional compound-level stats
+    
+    # Coverage metrics
+    coverage_per_compound: Dict[int, float]  # compound_id -> fraction of peaks found
+    mean_coverage: float  # Average coverage across all compounds
+    
+    # Calibration
     ece: float  # Expected Calibration Error
-    mce: float  # Maximum Calibration Error
+    
+    # Groupings for analysis
+    peaks_by_compound: Dict[int, List[int]]  # compound_id -> list of peak_ids assigned to it
+    true_peaks_by_compound: Dict[int, List[int]]  # compound_id -> list of true peak_ids
 
 
-class PeakAssignmentSoftmaxModel:
+class PeakAssignment:
     """
-    Peak assignment using softmax over candidates with null option.
+    Hierarchical Bayesian model for peak assignment.
     
-    Key improvements over pairwise logistic:
-    - Enforces exclusivity: exactly one compound (or null) per peak
-    - Includes null class for unmatched peaks
-    - Incorporates compound presence priors
-    - Temperature-based calibration
-    - Supports online updates from human feedback
+    This model uses:
+    - Minimal discriminative features (4 only)
+    - Hierarchical uncertainty modeling with learnable noise
+    - Beta-Bernoulli presence priors for active learning
+    - Explicit null class for unmatched peaks
+    
+    Mathematical formulation:
+    η_mean = θ₀ + X @ θ + log_π  # Linear predictor with presence priors
+    η ~ Normal(η_mean, σ)         # Hierarchical uncertainty
+    p = softmax(η)                # Category probabilities
+    y ~ Categorical(p)            # Assignment
     """
     
-    def __init__(self, 
+    # Define minimal feature set
+    MINIMAL_FEATURES = [
+        'mass_err_ppm',       # Fundamental: mass accuracy
+        'rt_z',               # Fundamental: RT accuracy
+        'log_intensity',      # Peak quality
+        'log_rt_uncertainty'  # Prediction confidence (important for AL)
+    ]
+    
+    def __init__(self,
                  mass_tolerance: float = 0.005,
-                 rt_window_k: float = 3.0,
-                 use_temperature: bool = True,
-                 standardize_features: bool = True,
+                 rt_window_k: float = 1.5,
+                 use_minimal_features: bool = True,
                  random_seed: int = 42):
         """
-        Initialize the softmax peak assignment model.
+        Initialize the hierarchical Bayesian model.
         
         Parameters
         ----------
@@ -60,17 +94,14 @@ class PeakAssignmentSoftmaxModel:
             Mass tolerance in Da for candidate generation
         rt_window_k : float
             RT window multiplier (in standard deviations)
-        use_temperature : bool
-            If True, include temperature parameter for calibration
-        standardize_features : bool
-            If True, standardize features before model fitting
+        use_minimal_features : bool
+            If True, use only minimal feature set (4 features)
         random_seed : int
             Random seed for reproducibility
         """
         self.mass_tolerance = mass_tolerance
         self.rt_window_k = rt_window_k
-        self.use_temperature = use_temperature
-        self.standardize_features = standardize_features
+        self.use_minimal_features = use_minimal_features
         self.random_seed = random_seed
         
         # Initialize random state
@@ -97,9 +128,7 @@ class PeakAssignmentSoftmaxModel:
                               rt_model=None) -> Dict[Tuple[int, int], Tuple[float, float]]:
         """
         Compute RT predictions with proper predictive variance.
-        
-        This reuses the exact logic from PeakAssignmentModel to ensure
-        consistency in RT predictions between models.
+        (Identical to softmax model for compatibility)
         """
         print("Computing RT predictions from posterior...")
         
@@ -134,7 +163,7 @@ class PeakAssignmentSoftmaxModel:
                 loc = (mu0 + sp_s + cp[:, m] + 
                        (beta @ desc_std[m]) + gamma * is_std[s])
                 
-                # Proper predictive variance: includes parameter uncertainty + noise
+                # Proper predictive variance
                 var = np.var(loc, ddof=1) + np.mean(sigy**2)
                 
                 rt_predictions[(s, m)] = (float(np.mean(loc)), float(np.sqrt(var)))
@@ -150,38 +179,17 @@ class PeakAssignmentSoftmaxModel:
                               species_cluster: np.ndarray,
                               init_presence: Optional[PresencePrior] = None,
                               initial_labeled_fraction: float = 0.0,
-                              initial_labeled_n: Optional[int] = None,
                               random_seed: Optional[int] = None) -> Dict[str, Any]:
         """
-        Generate training data for softmax model.
-        
-        Creates padded tensors with candidates + null for each peak.
-        
-        Parameters
-        ----------
-        peak_df : pd.DataFrame
-            DataFrame with peak information
-        compound_mass : np.ndarray
-            Array of compound masses
-        n_compounds : int
-            Number of compounds
-        species_cluster : np.ndarray
-            Cluster assignment for each species
-        init_presence : Optional[PresencePrior]
-            Initial presence prior (if None, creates uniform)
-            
-        Returns
-        -------
-        Dict[str, Any]
-            Training data pack with padded tensors and mappings
+        Generate training data with minimal features.
         """
         if not self.rt_predictions:
             raise ValueError("RT predictions not computed. Run compute_rt_predictions first.")
         
-        print(f"\nGenerating SOFTMAX training data...")
+        print(f"\nGenerating HIERARCHICAL BAYESIAN training data...")
         print(f"  Mass tolerance: ±{self.mass_tolerance} Da")
         print(f"  RT window: ±{self.rt_window_k}σ")
-        print(f"  Including NULL class for each peak")
+        print(f"  Minimal features: {self.use_minimal_features}")
         
         # Initialize presence prior if not provided
         n_species = len(np.unique(peak_df['species']))
@@ -193,7 +201,7 @@ class PeakAssignmentSoftmaxModel:
         # Track species median intensities
         species_medians = peak_df.groupby('species')['intensity'].median()
         
-        # First pass: collect candidates for each peak to find K_max
+        # Collect candidates for each peak
         peak_candidates = []
         peak_labels = []
         peak_species = []
@@ -212,13 +220,6 @@ class PeakAssignmentSoftmaxModel:
             rt = peak['rt']
             intensity = peak['intensity']
             median_intensity = species_medians[s]
-            
-            # Extract additional features if available (allowed, no ground-truth leakage)
-            peak_quality = peak.get('peak_quality', None)
-            sn_ratio = peak.get('sn_ratio', None)
-            peak_width = peak.get('peak_width', None)
-            peak_width_rt = peak.get('peak_width_rt', None)
-            peak_asymmetry = peak.get('peak_asymmetry', None)
             
             # Find candidates by mass
             candidates = []
@@ -242,44 +243,36 @@ class PeakAssignmentSoftmaxModel:
                 if abs(rt_z) > self.rt_window_k:
                     continue
                 
-                # Core features (always present)
-                log_intensity = np.log1p(intensity)
-                
-                # Confidence scores
-                mass_confidence = np.exp(-abs(mass_error_ppm) / 10)
-                rt_confidence = np.exp(-abs(rt_z) / 3)
-                combined_confidence = mass_confidence * rt_confidence
-                
-                # Context features
-                log_compound_mass = np.log(compound_mass[m])
-                log_rt_uncertainty = np.log(rt_pred_std + 1e-6)
-                log_relative_intensity = np.log1p(intensity / median_intensity) if median_intensity > 0 else 0
-                
-                # Build feature list
-                feat = [
-                    mass_error_ppm,
-                    rt_z,
-                    log_intensity,
-                    mass_confidence,
-                    rt_confidence,
-                    combined_confidence,
-                    log_compound_mass,
-                    log_rt_uncertainty,
-                    log_relative_intensity
-                ]
-                
-                # Add discriminative features if available
-                if peak_quality is not None:
-                    feat.append(peak_quality)
-                if sn_ratio is not None:
-                    feat.append(np.log1p(sn_ratio))  # Log transform for scale
-                if peak_width is not None:
-                    feat.append(peak_width)
-                # Add permitted peak shape features if present
-                if peak_width_rt is not None:
-                    feat.append(peak_width_rt)
-                if peak_asymmetry is not None:
-                    feat.append(peak_asymmetry)
+                # Build feature list - MINIMAL or ALL
+                if self.use_minimal_features:
+                    # Only 4 essential features
+                    feat = [
+                        mass_error_ppm,                    # Core
+                        rt_z,                              # Core
+                        np.log1p(intensity),               # Quality
+                        np.log(rt_pred_std + 1e-6)        # Uncertainty
+                    ]
+                else:
+                    # Include additional features for comparison
+                    log_intensity = np.log1p(intensity)
+                    mass_confidence = np.exp(-abs(mass_error_ppm) / 10)
+                    rt_confidence = np.exp(-abs(rt_z) / 3)
+                    combined_confidence = mass_confidence * rt_confidence
+                    log_compound_mass = np.log(compound_mass[m])
+                    log_rt_uncertainty = np.log(rt_pred_std + 1e-6)
+                    log_relative_intensity = np.log1p(intensity / median_intensity) if median_intensity > 0 else 0
+                    
+                    feat = [
+                        mass_error_ppm,
+                        rt_z,
+                        log_intensity,
+                        mass_confidence,
+                        rt_confidence,
+                        combined_confidence,
+                        log_compound_mass,
+                        log_rt_uncertainty,
+                        log_relative_intensity
+                    ]
                 
                 candidates.append(m)
                 features.append(feat)
@@ -298,55 +291,30 @@ class PeakAssignmentSoftmaxModel:
                 # True compound not in candidates (filtered out)
                 peak_labels.append(-1)  # Will be masked in training
         
-        # Find maximum number of candidates (plus 1 for null)
-        if not peak_candidates:
-            raise ValueError("No peaks to process. Check data generation.")
-        
+        # Find maximum number of candidates
         max_candidates = max(len(cands[0]) for cands in peak_candidates) if peak_candidates else 0
-        if max_candidates == 0:
-            print("WARNING: No valid candidates found for any peak. Check mass tolerance and RT window settings.")
-        
         self.K_max = max_candidates + 1  # +1 for null class
         
-        # Determine number of features from first non-empty candidate set
-        n_features = 9  # Default to base features
-        for cands, feats in peak_candidates:
-            if feats:
-                n_features = len(feats[0])
-                break
+        # Determine number of features
+        n_features = 4 if self.use_minimal_features else 9
         
-        # Store feature names dynamically
-        self.feature_names = [
-            'mass_err_ppm', 'rt_z', 'log_intensity',
-            'mass_confidence', 'rt_confidence', 'combined_confidence',
-            'log_compound_mass', 'log_rt_uncertainty', 'log_relative_intensity'
-        ]
-        
-        # Add names for additional features if present
-        if n_features > 9:
-            # Check what additional features are available
-            first_peak = peak_df.iloc[0] if len(peak_df) > 0 else None
-            if first_peak is not None:
-                if 'peak_quality' in first_peak and not pd.isna(first_peak.get('peak_quality')):
-                    self.feature_names.append('peak_quality')
-                if 'sn_ratio' in first_peak and not pd.isna(first_peak.get('sn_ratio')):
-                    self.feature_names.append('log_sn_ratio')
-                if 'peak_width' in first_peak and not pd.isna(first_peak.get('peak_width')):
-                    self.feature_names.append('peak_width')
-                if 'peak_width_rt' in first_peak and not pd.isna(first_peak.get('peak_width_rt')):
-                    self.feature_names.append('peak_width_rt')
-                if 'peak_asymmetry' in first_peak and not pd.isna(first_peak.get('peak_asymmetry')):
-                    self.feature_names.append('peak_asymmetry')
+        # Store feature names
+        if self.use_minimal_features:
+            self.feature_names = self.MINIMAL_FEATURES
+        else:
+            self.feature_names = [
+                'mass_err_ppm', 'rt_z', 'log_intensity',
+                'mass_confidence', 'rt_confidence', 'combined_confidence',
+                'log_compound_mass', 'log_rt_uncertainty', 'log_relative_intensity'
+            ]
         
         print(f"\nCandidate statistics:")
         print(f"  Number of peaks: {len(peak_candidates)}")
         print(f"  Max candidates per peak: {self.K_max - 1} (+ null)")
-        print(f"  Features per candidate: {n_features} ({len(self.feature_names)} named)")
-        print(f"  Peaks with true compound: {sum(1 for l in peak_labels if l > 0)}")
-        print(f"  Null peaks: {sum(1 for l in peak_labels if l == 0)}")
-        print(f"  Filtered peaks: {sum(1 for l in peak_labels if l == -1)}")
+        print(f"  Features per candidate: {n_features}")
+        print(f"  Feature names: {', '.join(self.feature_names)}")
         
-        # Build padded tensors with dynamic feature size
+        # Build padded tensors
         N = len(peak_candidates)
         X = np.zeros((N, self.K_max, n_features), dtype=np.float32)
         mask = np.zeros((N, self.K_max), dtype=bool)
@@ -359,7 +327,7 @@ class PeakAssignmentSoftmaxModel:
         
         # Fill padded tensors
         for i, ((candidates, features), s) in enumerate(zip(peak_candidates, peak_species)):
-            # First slot is always null (no features needed, will use theta_null)
+            # First slot is always null
             mask[i, 0] = True
             row_to_candidates.append([None] + candidates)  # None for null
             
@@ -368,42 +336,33 @@ class PeakAssignmentSoftmaxModel:
                 X[i, k, :] = feat
                 mask[i, k] = True
         
-        # Standardize features if requested (only on valid slots)
-        if self.standardize_features:
-            print("  Standardizing features...")
-            # Extract valid features for fitting scaler
-            valid_features = []
-            for i in range(N):
-                for k in range(1, self.K_max):  # Skip null slot
-                    if mask[i, k]:
-                        valid_features.append(X[i, k, :])
-            
-            if len(valid_features) > 0:
-                valid_features = np.array(valid_features)
-                self.feature_scaler.fit(valid_features)
-                
-                # Apply standardization
-                for i in range(N):
-                    for k in range(1, self.K_max):
-                        if mask[i, k]:
-                            X[i, k, :] = self.feature_scaler.transform(X[i, k, :].reshape(1, -1))[0]
+        # Standardize features
+        print("  Standardizing features...")
+        valid_features = []
+        for i in range(N):
+            for k in range(1, self.K_max):  # Skip null slot
+                if mask[i, k]:
+                    valid_features.append(X[i, k, :])
         
-        # Optionally reveal a small seed set of labels to enable initial supervised training
-        if initial_labeled_n is None and initial_labeled_fraction > 0:
+        if len(valid_features) > 0:
+            valid_features = np.array(valid_features)
+            self.feature_scaler.fit(valid_features)
+            
+            # Apply standardization
+            for i in range(N):
+                for k in range(1, self.K_max):
+                    if mask[i, k]:
+                        X[i, k, :] = self.feature_scaler.transform(X[i, k, :].reshape(1, -1))[0]
+        
+        # Optionally reveal a small seed set of labels
+        if initial_labeled_fraction > 0:
             valid_idx = np.where(true_labels >= 0)[0]
             n_seed = max(1, int(len(valid_idx) * initial_labeled_fraction))
             rng = np.random.default_rng(self.random_seed if random_seed is None else random_seed)
             if len(valid_idx) > 0:
                 seed_idx = rng.choice(valid_idx, size=min(n_seed, len(valid_idx)), replace=False)
                 labels[seed_idx] = true_labels[seed_idx]
-        elif initial_labeled_n is not None and initial_labeled_n > 0:
-            valid_idx = np.where(true_labels >= 0)[0]
-            rng = np.random.default_rng(self.random_seed if random_seed is None else random_seed)
-            if len(valid_idx) > 0:
-                n_seed = min(initial_labeled_n, len(valid_idx))
-                seed_idx = rng.choice(valid_idx, size=n_seed, replace=False)
-                labels[seed_idx] = true_labels[seed_idx]
-
+        
         # Store training pack
         self.train_pack = {
             'X': X,
@@ -422,20 +381,15 @@ class PeakAssignmentSoftmaxModel:
     
     def build_model(self) -> pm.Model:
         """
-        Build softmax model with null class and presence priors.
-        
-        Returns
-        -------
-        pm.Model
-            PyMC model for softmax assignment
+        Build hierarchical Bayesian model with learnable noise.
         """
         if not self.train_pack:
             raise ValueError("Training data not generated. Run generate_training_data first.")
         
-        print(f"\nBuilding SOFTMAX model")
+        print(f"\nBuilding HIERARCHICAL BAYESIAN model")
         print(f"  Features: {len(self.feature_names)}")
         print(f"  Max candidates: {self.K_max}")
-        print(f"  Temperature scaling: {self.use_temperature}")
+        print(f"  Uncertainty: Hierarchical Normal")
         
         X = self.train_pack['X']
         mask = self.train_pack['mask']
@@ -447,29 +401,19 @@ class PeakAssignmentSoftmaxModel:
         n_features = len(self.feature_names)
         
         with pm.Model() as model:
-            # Priors
-            if self.standardize_features:
-                # Tighter priors for standardized features
-                theta0 = pm.Normal('theta0', 0.0, 1.0)
-                theta_features = pm.Normal('theta_features', 0.0, 1.0, shape=n_features)
-                theta_null = pm.Normal('theta_null', 0.0, 1.0)
-            else:
-                theta0 = pm.Normal('theta0', 0.0, 2.0)
-                theta_features = pm.Normal('theta_features', 0.0, 2.0, shape=n_features)
-                theta_null = pm.Normal('theta_null', 0.0, 2.0)
+            # Priors - tighter for standardized features
+            theta0 = pm.Normal('theta0', 0.0, 1.0)
+            theta_features = pm.Normal('theta_features', 0.0, 1.0, shape=n_features)
+            theta_null = pm.Normal('theta_null', -1.0, 1.0)  # Slight bias against null
             
-            # Temperature parameter (on log scale to ensure positive)
-            if self.use_temperature:
-                log_T = pm.Normal('log_T', 0.0, 0.5)  # exp(0) = 1.0 by default
-                T = pm.Deterministic('T', pm.math.exp(log_T))
-            else:
-                T = 1.0
+            # Hierarchical uncertainty modeling
+            sigma_logit = pm.HalfNormal('sigma_logit', 0.5)
             
-            # Prepare data as PyMC constants (v5 uses Data)
+            # Prepare data as PyMC constants
             X_tensor = pm.Data('X', X)
             mask_tensor = pm.Data('mask', mask)
             
-            # Pre-compute presence priors for all species-compound pairs
+            # Pre-compute presence priors
             log_pi_null = self.presence.log_prior_null()
             
             # Build presence prior matrix
@@ -487,34 +431,26 @@ class PeakAssignmentSoftmaxModel:
             
             presence_tensor = pm.Data('presence_priors', presence_matrix)
             
-            # Compute features contribution for all candidates
-            # Shape: (N, K_max)
+            # Compute features contribution
             feature_contrib = pm.math.sum(X_tensor * theta_features[None, None, :], axis=2)
             
-            # Build logits using PyMC operations
-            # Initialize with very negative values for masked slots
-            eta = pm.math.ones((N, self.K_max)) * (-1e9)
-            
-            # Null logits (column 0)
+            # Build mean logits
             null_logits = theta_null + presence_tensor[:, 0]
-            
-            # Candidate logits (columns 1+)
             candidate_logits = theta0 + feature_contrib[:, 1:] + presence_tensor[:, 1:]
+            eta_mean = pm.math.concatenate([null_logits[:, None], candidate_logits], axis=1)
             
-            # Combine null and candidate logits
-            eta = pm.math.concatenate([null_logits[:, None], candidate_logits], axis=1)
+            # Apply mask
+            eta_mean = pm.math.where(mask_tensor, eta_mean, -1e9)
             
-            # Apply mask: set invalid slots to very negative
-            eta = pm.math.where(mask_tensor, eta, -1e9)
+            # Apply hierarchical uncertainty
+            eta_noise = pm.Normal('eta_noise', 0, 1, shape=(N, self.K_max))
+            eta = pm.Deterministic('eta', eta_mean + sigma_logit * eta_noise)
             
-            # Name the tensor for debugging
-            eta_tensor = pm.Deterministic('eta', eta)
-            
-            # Apply temperature and compute softmax
-            scaled_eta = eta_tensor / T
+            # Ensure masked values stay very negative
+            eta_final = pm.math.where(mask_tensor, eta, -1e9)
             
             # Softmax probabilities
-            p = pm.Deterministic('p', pm.math.softmax(scaled_eta, axis=1))
+            p = pm.Deterministic('p', pm.math.softmax(eta_final, axis=1))
             
             # Filter to only peaks with known labels for training
             train_mask = labels >= 0
@@ -537,31 +473,12 @@ class PeakAssignmentSoftmaxModel:
               chains: int = 2,
               target_accept: float = 0.95,
               seed: int = 42) -> az.InferenceData:
-        """
-        Sample from the posterior using NUTS.
-        
-        Parameters
-        ----------
-        draws : int
-            Number of samples to draw
-        tune : int
-            Number of tuning steps
-        chains : int
-            Number of chains
-        target_accept : float
-            Target acceptance rate
-        seed : int
-            Random seed
-            
-        Returns
-        -------
-        az.InferenceData
-            Posterior samples
-        """
+        """Sample from the posterior using NUTS."""
         if self.model is None:
             raise ValueError("Model not built. Call build_model first.")
         
-        print(f"\nSampling SOFTMAX model with {chains} chains, {draws} samples each...")
+        print(f"\nSampling HIERARCHICAL BAYESIAN model with {chains} chains, {draws} samples each...")
+        print(f"  Uncertainty: Hierarchical Normal")
         
         with self.model:
             self.trace = pm.sample(
@@ -576,14 +493,7 @@ class PeakAssignmentSoftmaxModel:
         return self.trace
     
     def predict_probs(self) -> Dict[int, np.ndarray]:
-        """
-        Compute posterior predictive probabilities for each peak.
-        
-        Returns
-        -------
-        Dict[int, np.ndarray]
-            peak_id -> probability vector [p_null, p_c1, ...]
-        """
+        """Compute posterior predictive probabilities for each peak."""
         if self.trace is None:
             raise ValueError("No trace available. Run sample first.")
         
@@ -610,52 +520,26 @@ class PeakAssignmentSoftmaxModel:
         
         return peak_probs
     
-    def predict_prob_samples(self) -> Dict[int, np.ndarray]:
+    def assign(self, prob_threshold: float = 0.5, eval_peak_ids: Optional[set] = None, 
+               compound_info: Optional[pd.DataFrame] = None) -> AssignmentResults:
         """
-        Return posterior samples of per-peak probabilities.
-        
-        Returns
-        -------
-        Dict[int, np.ndarray]
-            peak_id -> array of shape (n_samples, K_i) with valid classes only
-        """
-        if self.trace is None:
-            raise ValueError("No trace available. Run sample first.")
-        
-        # Get posterior samples
-        p = self.trace.posterior['p'].values  # (chains, draws, N, K_max)
-        samples = p.reshape(-1, p.shape[2], p.shape[3])  # (S, N, K_max)
-        
-        out = {}
-        for i, peak_id in enumerate(self.train_pack['peak_ids']):
-            mask_i = self.train_pack['mask'][i]
-            pi = samples[:, i, mask_i]  # (S, K_i)
-            # Renormalize to ensure proper probabilities
-            pi = pi / np.clip(pi.sum(axis=1, keepdims=True), 1e-12, None)
-            out[int(peak_id)] = pi
-        
-        return out
-    
-    def assign(self, prob_threshold: float = 0.5, eval_peak_ids: Optional[set] = None) -> SoftmaxAssignmentResults:
-        """
-        Assign compounds to peaks based on softmax probabilities.
+        Assign compounds to peaks with many-to-one support.
+        Now properly evaluates multiple peaks from the same compound as all correct.
+        Also properly accounts for decoy compounds as false positives.
         
         Parameters
         ----------
         prob_threshold : float
-            Minimum probability for assignment (default: 0.5)
-            
-        Returns
-        -------
-        SoftmaxAssignmentResults
-            Assignment results with metrics
+            Probability threshold for assignment
+        eval_peak_ids : Optional[set]
+            Peak IDs to evaluate (if None, evaluate all)
+        compound_info : Optional[pd.DataFrame]
+            Compound information including 'is_decoy' flag
         """
         if self.trace is None:
             raise ValueError("No trace available. Run sample first.")
         
-        print(f"\nSoftmax Peak Assignment")
-        print(f"="*50)
-        print(f"Probability threshold: {prob_threshold:.2f}")
+        # Silent - no printing in library code
         
         # Get probabilities
         peak_probs = self.predict_probs()
@@ -681,94 +565,189 @@ class PeakAssignmentSoftmaxModel:
                 # Either null or below threshold
                 assignments[peak_id] = None
         
-        # Calculate metrics (optionally on evaluation subset)
+        # Get ground truth
         true_labels = self.train_pack.get('true_labels', self.train_pack['labels'])
         peak_ids = self.train_pack['peak_ids']
         row_to_candidates = self.train_pack['row_to_candidates']
         
+        # Build mappings for many-to-one evaluation
+        true_peaks_by_compound = defaultdict(list)
+        pred_peaks_by_compound = defaultdict(list)
+        
+        # FIRST PASS: Build compound mappings from ALL peaks (for compound-level metrics)
+        # This ensures metrics match what's saved in the CSV
+        for i, (peak_id, label) in enumerate(zip(peak_ids, true_labels)):
+            pred = assignments.get(peak_id)
+            candidates = row_to_candidates[i]
+            
+            # Get true compound (handle both training and test peaks)
+            if label < 0:
+                # Training peak - negative indicates it's in training set
+                # Use absolute value as the label
+                true_label = abs(label)
+                if true_label >= len(candidates):
+                    continue  # Skip if index out of range
+                if true_label == 0:
+                    true_comp = None
+                else:
+                    true_comp = candidates[true_label]
+                    true_peaks_by_compound[true_comp].append(peak_id)
+            else:
+                # Test peak - use label directly
+                if label == 0:
+                    true_comp = None
+                else:
+                    if label >= len(candidates):
+                        continue  # Skip if index out of range
+                    true_comp = candidates[label]
+                    true_peaks_by_compound[true_comp].append(peak_id)
+            
+            # Track predicted compounds
+            if pred is not None:
+                pred_peaks_by_compound[pred].append(peak_id)
+        
+        # SECOND PASS: Calculate peak-level metrics (test peaks only)
         tp = fp = fn = tn = 0
         all_probs = []
         all_correct = []
         
         eval_set = set(map(int, eval_peak_ids)) if eval_peak_ids is not None else set(map(int, peak_ids))
+        
         for i, (peak_id, label) in enumerate(zip(peak_ids, true_labels)):
             if int(peak_id) not in eval_set:
                 continue
             if label < 0:
-                continue  # Skip filtered peaks
+                continue  # Skip training peaks for peak-level metrics
             
             pred = assignments.get(peak_id)
             candidates = row_to_candidates[i]
             
-            # Get true compound
+            # Get true compound for peak-level metrics
             if label == 0:
                 true_comp = None
             else:
                 true_comp = candidates[label]
             
-            # Classification metrics
+            # CORRECTED Peak-level metrics for many-to-one
             if true_comp is None:
+                # Noise peak
                 if pred is None:
-                    tn += 1
+                    tn += 1  # Correctly identified as noise
                 else:
-                    fp += 1
+                    fp += 1  # Incorrectly assigned to a compound
             else:
+                # Real peak
                 if pred == true_comp:
-                    tp += 1
+                    tp += 1  # Correctly assigned (many-to-one is OK!)
                 elif pred is None:
-                    fn += 1
+                    fn += 1  # Missed assignment
                 else:
-                    fp += 1
-                    fn += 1  # Wrong assignment counts as both FP and FN
+                    fp += 1  # Wrong compound
+                    fn += 1  # Also counts as missing the true compound
             
             # Calibration data
             all_probs.append(top_probs[peak_id])
             all_correct.append(1 if pred == true_comp else 0)
         
+        # Peak-level metrics
         precision = tp / (tp + fp) if (tp + fp) > 0 else 0
         recall = tp / (tp + fn) if (tp + fn) > 0 else 0
         f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
         
-        # Calculate calibration metrics
-        ece, mce = self._calculate_calibration_metrics(
-            np.array(all_probs), 
-            np.array(all_correct)
-        )
+        # COMPOUND-LEVEL METRICS (PRIMARY)
+        true_compounds = set(true_peaks_by_compound.keys())
+        pred_compounds = set(pred_peaks_by_compound.keys())
         
-        print(f"\nResults:")
-        print(f"  Assignments made: {sum(1 for v in assignments.values() if v is not None)}")
-        print(f"  Null assignments: {sum(1 for v in assignments.values() if v is None)}")
-        print(f"  Precision: {precision:.3f}")
-        print(f"  Recall: {recall:.3f}")
-        print(f"  F1: {f1:.3f}")
-        print(f"  ECE: {ece:.3f}")
-        print(f"  MCE: {mce:.3f}")
+        # Separate real vs decoy compounds if compound_info provided
+        decoy_compounds = set()
+        real_compound_ids = set()
+        if compound_info is not None and 'is_decoy' in compound_info.columns:
+            # Get decoy compound IDs from the compound_id column
+            decoy_compounds = set(compound_info[compound_info['is_decoy']]['compound_id'].values)
+            real_compound_ids = set(compound_info[~compound_info['is_decoy']]['compound_id'].values)
+            
+            # Filter predicted compounds into real vs decoy
+            pred_real = pred_compounds - decoy_compounds
+            pred_decoys = pred_compounds & decoy_compounds
+            
+            # True positives: predicted real compounds that are in true_compounds
+            correct_compounds = pred_real & true_compounds
+            # False positives: predicted decoys + predicted real not in true_compounds
+            false_positive_compounds = pred_decoys | (pred_real - true_compounds)
+            # Missed compounds: true compounds not predicted
+            missed_compounds = true_compounds - pred_compounds
+            
+            # Calculate metrics with decoy awareness
+            total_predicted = len(pred_compounds)
+            compound_precision = len(correct_compounds) / total_predicted if total_predicted > 0 else 0
+            compound_recall = len(correct_compounds) / len(true_compounds) if true_compounds else 0
+        else:
+            # Original calculation (no decoy info)
+            correct_compounds = pred_compounds & true_compounds
+            false_positive_compounds = pred_compounds - true_compounds
+            missed_compounds = true_compounds - pred_compounds
+            
+            compound_precision = len(correct_compounds) / len(pred_compounds) if pred_compounds else 0
+            compound_recall = len(correct_compounds) / len(true_compounds) if true_compounds else 0
+            pred_decoys = set()
         
-        return SoftmaxAssignmentResults(
+        compound_f1 = 2 * compound_precision * compound_recall / (compound_precision + compound_recall) \
+                      if (compound_precision + compound_recall) > 0 else 0
+        
+        # COVERAGE METRICS
+        coverage_per_compound = {}
+        for compound in true_compounds:
+            true_peaks = set(true_peaks_by_compound[compound])
+            pred_peaks = set(pred_peaks_by_compound.get(compound, []))
+            coverage = len(true_peaks & pred_peaks) / len(true_peaks) if true_peaks else 0
+            coverage_per_compound[compound] = coverage
+        
+        mean_coverage = np.mean(list(coverage_per_compound.values())) if coverage_per_compound else 0
+        
+        # Calculate calibration
+        ece = self._calculate_ece(np.array(all_probs), np.array(all_correct))
+        
+        # Don't print here - let train.py handle all output
+        
+        return AssignmentResults(
             assignments=assignments,
             top_prob=top_probs,
             per_peak_probs=peak_probs,
+            # Peak-level
             precision=precision,
             recall=recall,
             f1=f1,
             confusion_matrix={'TP': tp, 'FP': fp, 'TN': tn, 'FN': fn},
+            # Compound-level (PRIMARY)
+            compound_precision=compound_precision,
+            compound_recall=compound_recall,
+            compound_f1=compound_f1,
+            compound_metrics={
+                'identified': len(correct_compounds),
+                'total': len(true_compounds),
+                'false_positives': len(false_positive_compounds),
+                'missed': len(missed_compounds),
+                'decoys_assigned': len(pred_decoys) if compound_info is not None else 0
+            },
+            # Coverage
+            coverage_per_compound=coverage_per_compound,
+            mean_coverage=mean_coverage,
+            # Calibration
             ece=ece,
-            mce=mce
+            # Groupings
+            peaks_by_compound=dict(pred_peaks_by_compound),
+            true_peaks_by_compound=dict(true_peaks_by_compound)
         )
     
-    def _calculate_calibration_metrics(self, probs: np.ndarray, labels: np.ndarray, n_bins: int = 10):
-        """Calculate Expected and Maximum Calibration Error."""
+    def _calculate_ece(self, probs: np.ndarray, labels: np.ndarray, n_bins: int = 10):
+        """Calculate Expected Calibration Error."""
         if len(probs) == 0 or len(labels) == 0:
-            return 0.0, 0.0
+            return 0.0
         
-        # Ensure arrays are same length and valid
         probs = np.clip(probs, 1e-12, 1 - 1e-12)
-        
         bin_boundaries = np.linspace(0, 1, n_bins + 1)
         
         ece = 0
-        mce = 0
-        
         for j in range(n_bins):
             bin_lower = bin_boundaries[j]
             bin_upper = bin_boundaries[j + 1]
@@ -783,10 +762,7 @@ class PeakAssignmentSoftmaxModel:
             if prop_in_bin > 0 and np.sum(in_bin) > 0:
                 accuracy_in_bin = labels[in_bin].mean()
                 avg_confidence_in_bin = probs[in_bin].mean()
-                
                 calibration_error = abs(avg_confidence_in_bin - accuracy_in_bin)
-                
                 ece += prop_in_bin * calibration_error
-                mce = max(mce, calibration_error)
         
-        return ece, mce
+        return ece

@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """
-CompAssign training pipeline for RT regression and softmax compound assignment.
+CompAssign training pipeline for RT regression and hierarchical Bayesian assignment.
 
-This script trains both the hierarchical RT model and the softmax peak assignment model.
-Optimized for high precision metabolomics compound assignment.
+This script trains both the hierarchical RT model and the hierarchical Bayesian assignment model.
+Optimized for high precision metabolomics compound assignment with minimal features.
 """
 
 import argparse
@@ -16,7 +16,7 @@ from pathlib import Path
 from datetime import datetime
 
 from src.compassign.rt_hierarchical import HierarchicalRTModel
-from src.compassign.peak_assignment_softmax import PeakAssignmentSoftmaxModel
+from src.compassign.peak_assignment import PeakAssignment
 from src.compassign.diagnostic_plots import create_all_diagnostic_plots
 from src.compassign.assignment_plots import create_assignment_plots
 
@@ -34,7 +34,7 @@ def print_flush(msg):
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description='Train CompAssign softmax model for metabolomics compound assignment',
+        description='Train CompAssign hierarchical Bayesian model for metabolomics compound assignment',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         epilog='Synthetic data includes isomers and near-isobars. See docs for details.'
     )
@@ -46,7 +46,7 @@ def parse_args():
                        help='Number of species (~5 per cluster)')
     parser.add_argument('--n-classes', type=int, default=4,
                        help='Number of compound classes')
-    parser.add_argument('--n-compounds', type=int, default=10,
+    parser.add_argument('--n-compounds', type=int, default=20,
                        help='Number of compounds')
     
     # Sampling parameters
@@ -60,15 +60,12 @@ def parse_args():
                        help='Target acceptance rate for NUTS')
     
     # Model parameters
-    parser.add_argument('--mass-tolerance', type=float, default=0.005,
-                       help='Mass tolerance in Da')
-    parser.add_argument('--rt-window-k', type=float, default=1.5,
-                       help='RT window multiplier k*sigma')
+    parser.add_argument('--mass-tolerance', type=float, default=0.01,
+                       help='Mass tolerance in Da (default: 0.01 for harder data)')
+    parser.add_argument('--rt-window-k', type=float, default=2.0,
+                       help='RT window multiplier k*sigma (default: 2.0 for harder data)')
     parser.add_argument('--probability-threshold', type=float, default=0.7,
                        help='Probability threshold for assignment')
-    parser.add_argument('--matching', type=str, default='greedy',
-                       choices=['hungarian', 'greedy', 'none'],
-                       help='One-to-one matching algorithm')
     parser.add_argument('--test-thresholds', action='store_true',
                        help='Test multiple probability thresholds')
     
@@ -81,7 +78,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def test_threshold_impact(softmax_model, output_path):
+def test_threshold_impact(assignment_model, output_path):
     """Test different thresholds to show precision-recall tradeoff."""
     
     print_flush("\n" + "="*60)
@@ -92,7 +89,7 @@ def test_threshold_impact(softmax_model, output_path):
     results = []
     
     for thresh in thresholds:
-        result = softmax_model.assign(prob_threshold=thresh)
+        result = assignment_model.assign(prob_threshold=thresh)
         results.append({
             'threshold': thresh,
             'precision': result.precision,
@@ -132,12 +129,7 @@ def main():
     with open(output_path / "config.json", 'w') as f:
         json.dump(config, f, indent=2)
     
-    print_flush("="*60)
-    print_flush("COMPASSIGN TRAINING PIPELINE")
-    print_flush(f"Compounds: {args.n_compounds}, Species: {args.n_species}")
-    print_flush(f"Mass tolerance: {args.mass_tolerance} Da, RT window: ±{args.rt_window_k}σ")
-    print_flush(f"Matching: {args.matching}, Threshold: {args.probability_threshold}")
-    print_flush("="*60)
+    # Start training
     
     # 1. Generate synthetic data
     print_flush("\n1. Generating synthetic data...")
@@ -146,7 +138,12 @@ def main():
         n_compounds=args.n_compounds,
         n_species=args.n_species,
         n_peaks_per_compound=3,
-        n_noise_peaks=100
+        n_noise_peaks=max(200, args.n_compounds * 10),  # More noise peaks
+        isomer_fraction=0.4,  # 40% of compounds are isomers (increased)
+        near_isobar_fraction=0.3,  # 30% are near-isobars (increased)
+        mass_error_std=0.004,  # Higher mass error for more overlap
+        rt_uncertainty_range=(0.2, 0.8),  # Higher RT uncertainty
+        decoy_fraction=0.5  # 50% of compounds are decoys (never appear in samples!)
     )
     
     # Adapt to expected format
@@ -230,21 +227,17 @@ def main():
     
     # 4. Train softmax assignment model
     print_flush("\n4. Training peak assignment model...")
-    print_flush(f"   Model: softmax")
-    print_flush(f"   Mass tolerance: {args.mass_tolerance} Da")
-    print_flush(f"   RT window: ±{args.rt_window_k}σ")
-    print_flush(f"   Matching algorithm: {args.matching}")
-    print_flush(f"   Probability threshold: {args.probability_threshold}")
     
-    # Initialize softmax model
-    softmax_model = PeakAssignmentSoftmaxModel(
+    # Initialize hierarchical Bayesian model
+    assignment_model = PeakAssignment(
         mass_tolerance=args.mass_tolerance,
         rt_window_k=args.rt_window_k,
+        use_minimal_features=True,
         random_seed=args.seed
     )
     
     # Compute RT predictions
-    rt_predictions = softmax_model.compute_rt_predictions(
+    rt_predictions = assignment_model.compute_rt_predictions(
         trace_rt=trace_rt,
         n_species=args.n_species,
         n_compounds=args.n_compounds,
@@ -254,7 +247,7 @@ def main():
     )
     
     # Generate training data
-    train_pack = softmax_model.generate_training_data(
+    train_pack = assignment_model.generate_training_data(
         peak_df=peak_df,
         compound_mass=compound_info['true_mass'].values,
         n_compounds=args.n_compounds,
@@ -263,22 +256,25 @@ def main():
     )
     
     # Build and sample
-    softmax_model.build_model()
-    trace_assignment = softmax_model.sample(
+    assignment_model.build_model()
+    trace_assignment = assignment_model.sample(
         draws=args.n_samples,
         tune=args.n_tune,
-        chains=args.n_chains or 2,
+        chains=args.n_chains or 4,  # Use 4 chains by default like RT model
         target_accept=args.target_accept
     )
     
-    # Get predictions
-    results = softmax_model.assign(prob_threshold=args.probability_threshold)
+    # Get predictions (pass compound_info to properly handle decoys)
+    results = assignment_model.assign(
+        prob_threshold=args.probability_threshold,
+        compound_info=compound_info
+    )
     
     # Save traces and results
     trace_assignment.to_netcdf(output_path / "models" / "assignment_trace.nc")
     
     # Save peak assignments
-    peak_id_array = softmax_model.train_pack['peak_ids']
+    peak_id_array = assignment_model.train_pack['peak_ids']
     assignment_df = pd.DataFrame([
         {
             'peak_id': int(pid),
@@ -289,20 +285,34 @@ def main():
     ])
     assignment_df.to_csv(output_path / "results" / "peak_assignments.csv", index=False)
     
+    # Save compound information (including decoy status)
+    compound_info.to_csv(output_path / "results" / "compound_info.csv", index=False)
+    
     # Save metrics
     metrics = {
+        # Peak-level metrics
         'precision': float(results.precision),
         'recall': float(results.recall),
         'f1': float(results.f1),
+        # Compound-level metrics (PRIMARY)
+        'compound_precision': float(results.compound_precision),
+        'compound_recall': float(results.compound_recall),
+        'compound_f1': float(results.compound_f1),
+        'compounds_identified': results.compound_metrics['identified'],
+        'compounds_total': results.compound_metrics['total'],
+        'compounds_false_positives': results.compound_metrics.get('false_positives', 0),
+        'compounds_decoys_assigned': results.compound_metrics.get('decoys_assigned', 0),
+        # Coverage
+        'mean_coverage': float(results.mean_coverage),
+        # Other metrics
         'ece': float(results.ece),
-        'mce': float(results.mce),
         'true_positives': int(results.confusion_matrix.get('TP', 0)),
         'false_positives': int(results.confusion_matrix.get('FP', 0)),
         'false_negatives': int(results.confusion_matrix.get('FN', 0)),
         'n_assigned': len([v for v in results.assignments.values() if v is not None]),
         'n_peaks': len(results.assignments),
         'timestamp': datetime.now().isoformat(),
-        'model': 'softmax',
+        'model': 'hierarchical_bayesian',
         'mass_tolerance': args.mass_tolerance,
         'rt_window_k': args.rt_window_k,
         'probability_threshold': args.probability_threshold
@@ -311,20 +321,15 @@ def main():
     with open(output_path / "results" / "assignment_metrics.json", 'w') as f:
         json.dump(metrics, f, indent=2)
     
-    # 5. Print results
-    print_flush("\n5. Making predictions...")
-    print_flush(f"\nResults:")
-    print_flush(f"  Assignments made: {metrics['n_assigned']}")
-    print_flush(f"  Null assignments: {metrics['n_peaks'] - metrics['n_assigned']}")
-    print_flush(f"  Precision: {metrics['precision']:.3f}")
-    print_flush(f"  Recall: {metrics['recall']:.3f}")
-    print_flush(f"  F1: {metrics['f1']:.3f}")
-    print_flush(f"  ECE: {metrics['ece']:.3f}")
-    print_flush(f"  MCE: {metrics['mce']:.3f}")
+    # 5. Print results (concise version)
+    print_flush("\n5. Results:")
+    print_flush(f"  Compounds: {metrics['compounds_identified']}/{metrics['compounds_total']} identified (F1={metrics['compound_f1']:.3f})")
+    print_flush(f"  Coverage: {metrics['mean_coverage']:.1%} of peaks per compound")
+    print_flush(f"  Peaks: {metrics['n_assigned']}/{metrics['n_peaks']} assigned (F1={metrics['f1']:.3f})")
     
     # Test threshold impact if requested
     if args.test_thresholds:
-        test_threshold_impact(softmax_model, output_path / "results")
+        test_threshold_impact(assignment_model, output_path / "results")
     
     # Create assignment plots (skip for now - needs fixing)
     # print_flush("\n6. Creating assignment plots...")
@@ -336,14 +341,12 @@ def main():
     # )
     
     # Print final summary
-    print_flush("\n" + "="*60)
-    print_flush("TRAINING COMPLETE")
-    print_flush("="*60)
+    print_flush("\n5. Training complete")
     
     # Calculate dataset statistics
-    N, K = softmax_model.train_pack['mask'].shape
-    n_valid_slots = softmax_model.train_pack['mask'].sum()
-    train_idx = np.where(softmax_model.train_pack['labels'] >= 0)[0]
+    N, K = assignment_model.train_pack['mask'].shape
+    n_valid_slots = assignment_model.train_pack['mask'].sum()
+    train_idx = np.where(assignment_model.train_pack['labels'] >= 0)[0]
     n_train = len(train_idx)
     n_test = N - n_train
     
@@ -354,22 +357,25 @@ def main():
     print_flush(f"  Train peaks: {n_train} ({n_train/N*100:.1f}%)")
     print_flush(f"  Test peaks: {n_test} ({n_test/N*100:.1f}%)")
     
-    print_flush(f"\nTest-set performance:")
-    print_flush(f"  Precision: {metrics['precision']:.3f} ({metrics['precision']*100:.1f}%)")
-    print_flush(f"  Recall:    {metrics['recall']:.3f} ({metrics['recall']*100:.1f}%)")
-    print_flush(f"  F1:        {metrics['f1']:.3f}")
-    print_flush(f"  ECE:       {metrics['ece']:.3f}")
-    print_flush(f"  MCE:       {metrics['mce']:.3f}")
-    print_flush(f"  False Positives: {metrics['false_positives']}")
-    print_flush(f"  True Positives:  {metrics['true_positives']}")
+    print_flush(f"\nCompound-level performance:")
+    print_flush(f"  Compound Precision: {metrics['compound_precision']:.3f} ({metrics['compound_precision']*100:.1f}%)")
+    print_flush(f"  Compound Recall:    {metrics['compound_recall']:.3f} ({metrics['compound_recall']*100:.1f}%)")
+    print_flush(f"  Compound F1:        {metrics['compound_f1']:.3f}")
+    print_flush(f"  Mean Coverage:      {metrics['mean_coverage']:.3f}")
     
-    print_flush(f"\nParameters used:")
-    print_flush(f"  Mass tolerance: {args.mass_tolerance} Da")
-    print_flush(f"  RT window: ±{args.rt_window_k}σ")
-    print_flush(f"  Probability threshold: {args.probability_threshold}")
-    print_flush(f"  Matching: {args.matching}")
+    # Show decoy statistics if available
+    if results.compound_metrics.get('decoys_assigned', 0) > 0:
+        print_flush(f"\nDecoy detection:")
+        print_flush(f"  Decoys incorrectly assigned: {results.compound_metrics['decoys_assigned']}")
+        print_flush(f"  False positives (total): {results.compound_metrics.get('false_positives', 0)}")
     
-    print_flush(f"\nOutput directory: {output_path}/")
+    print_flush(f"\nPeak-level performance:")
+    print_flush(f"  Peak Precision: {metrics['precision']:.3f} ({metrics['precision']*100:.1f}%)")
+    print_flush(f"  Peak Recall:    {metrics['recall']:.3f} ({metrics['recall']*100:.1f}%)")
+    print_flush(f"  Peak F1:        {metrics['f1']:.3f}")
+    print_flush(f"  ECE:            {metrics['ece']:.3f}")
+    
+    print_flush(f"\nResults saved to: {output_path}/")
 
 
 if __name__ == "__main__":

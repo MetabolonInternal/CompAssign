@@ -11,7 +11,7 @@ import pandas as pd
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
 
-from .peak_assignment_softmax import PeakAssignmentSoftmaxModel
+from .peak_assignment import PeakAssignment
 from .presence_prior import PresencePrior
 from .oracles import Oracle
 from .active_learning import select_batch
@@ -84,7 +84,7 @@ def calculate_expected_fp(probs_dict: Dict[int, np.ndarray],
 
 
 def simulate_annotation_round(
-    softmax_model: Any,
+    assignment_model: Any,
     oracle: Oracle,
     batch_peak_ids: List[int],
     peak_df: pd.DataFrame,
@@ -98,7 +98,7 @@ def simulate_annotation_round(
     
     Parameters
     ----------
-    softmax_model : PeakAssignmentSoftmaxModel
+    assignment_model : PeakAssignment
         The softmax assignment model
     oracle : Oracle
         Oracle to provide labels
@@ -127,8 +127,8 @@ def simulate_annotation_round(
         print(f"{'='*60}")
     
     # Get initial metrics
-    probs_before = softmax_model.predict_probs()
-    results_before = softmax_model.assign(prob_threshold=threshold)
+    probs_before = assignment_model.predict_probs()
+    results_before = assignment_model.assign(prob_threshold=threshold)
     entropy_before = calculate_entropy(probs_before)
     expected_fp_before = calculate_expected_fp(probs_before, threshold)
     
@@ -136,8 +136,7 @@ def simulate_annotation_round(
         'precision': results_before.precision,
         'recall': results_before.recall,
         'f1': results_before.f1,
-        'ece': results_before.ece,
-        'mce': results_before.mce
+        'ece': results_before.ece
     }
     
     if verbose:
@@ -169,8 +168,8 @@ def simulate_annotation_round(
         probs = probs_before[peak_id]
         
         # Get candidate mapping
-        row_idx = softmax_model.train_pack['peak_to_row'][peak_id]
-        candidate_map = softmax_model.train_pack['row_to_candidates'][row_idx]
+        row_idx = assignment_model.train_pack['peak_to_row'][peak_id]
+        candidate_map = assignment_model.train_pack['row_to_candidates'][row_idx]
         
         # Get oracle label with peak features for intelligent decisions
         peak_features = {
@@ -204,18 +203,18 @@ def simulate_annotation_round(
         labels_provided.append(label)
         
         # Update presence prior if available (softmax). Generative model may not have it.
-        if hasattr(softmax_model, 'presence') and softmax_model.presence is not None:
+        if hasattr(assignment_model, 'presence') and assignment_model.presence is not None:
             if label == 0:
-                softmax_model.presence.update_null()
+                assignment_model.presence.update_null()
             else:
                 compound_idx = candidate_map[label]
-                softmax_model.presence.update_positive(species_idx, compound_idx, weight=1.0)
-                softmax_model.presence.update_not_null()
+                assignment_model.presence.update_positive(species_idx, compound_idx, weight=1.0)
+                assignment_model.presence.update_not_null()
                 # Light negatives for other candidates of this peak
                 for k in range(1, len(candidate_map)):
                     c_alt = candidate_map[k]
                     if c_alt is not None and c_alt != compound_idx:
-                        softmax_model.presence.update_negative(species_idx, c_alt, weight=0.25)
+                        assignment_model.presence.update_negative(species_idx, c_alt, weight=0.25)
             
             # Store RT observation for potential RT model update
             rt_observations.append({
@@ -237,16 +236,16 @@ def simulate_annotation_round(
         
         # Update labels in training pack
         for peak_id, label in zip(labeled_peaks, labels_provided):
-            row_idx = softmax_model.train_pack['peak_to_row'][peak_id]
-            softmax_model.train_pack['labels'][row_idx] = label
+            row_idx = assignment_model.train_pack['peak_to_row'][peak_id]
+            assignment_model.train_pack['labels'][row_idx] = label
         
         # Rebuild and resample model
-        softmax_model.build_model()
-        softmax_model.sample(draws=1000, tune=1000, chains=4)  # Quick refit
+        assignment_model.build_model()
+        assignment_model.sample(draws=1000, tune=1000, chains=4)  # Quick refit
     
     # Get updated metrics
-    probs_after = softmax_model.predict_probs()
-    results_after = softmax_model.assign(prob_threshold=threshold)
+    probs_after = assignment_model.predict_probs()
+    results_after = assignment_model.assign(prob_threshold=threshold)
     entropy_after = calculate_entropy(probs_after)
     expected_fp_after = calculate_expected_fp(probs_after, threshold)
     
@@ -254,8 +253,7 @@ def simulate_annotation_round(
         'precision': results_after.precision,
         'recall': results_after.recall,
         'f1': results_after.f1,
-        'ece': results_after.ece,
-        'mce': results_after.mce
+        'ece': results_after.ece
     }
     
     if verbose:
@@ -281,7 +279,7 @@ def simulate_annotation_round(
 
 
 def run_annotation_experiment(
-    softmax_model: Any,
+    assignment_model: Any,
     oracle: Oracle,
     peak_df: pd.DataFrame,
     compound_mass: np.ndarray,
@@ -296,7 +294,7 @@ def run_annotation_experiment(
     
     Parameters
     ----------
-    softmax_model : PeakAssignmentSoftmaxModel
+    assignment_model : PeakAssignment
         The softmax assignment model
     oracle : Oracle
         Oracle to provide labels
@@ -330,7 +328,7 @@ def run_annotation_experiment(
             print(f"{'#'*60}")
         
         # Select peaks for annotation
-        available_peaks = [pid for pid in softmax_model.train_pack['peak_ids'] 
+        available_peaks = [pid for pid in assignment_model.train_pack['peak_ids'] 
                           if pid not in annotated_peaks]
         
         if len(available_peaks) == 0:
@@ -338,20 +336,20 @@ def run_annotation_experiment(
             break
         
         # Build features dictionary for diversity-aware selection
-        X = softmax_model.train_pack['X']  # (N, Kmax, 9)
-        mask = softmax_model.train_pack['mask']  # (N, Kmax)
-        peak_ids_array = softmax_model.train_pack['peak_ids']
+        X = assignment_model.train_pack['X']  # (N, Kmax, 9)
+        mask = assignment_model.train_pack['mask']  # (N, Kmax)
+        peak_ids_array = assignment_model.train_pack['peak_ids']
         
         # Get posterior mean probabilities; support 'r' (generative) or 'p' (softmax)
         p_mean = None
-        if hasattr(softmax_model, 'trace') and softmax_model.trace is not None:
-            post = softmax_model.trace.posterior
+        if hasattr(assignment_model, 'trace') and assignment_model.trace is not None:
+            post = assignment_model.trace.posterior
             if 'r' in post:
                 p_mean = post['r'].values.mean(axis=(0,1))
             elif 'p' in post:
                 p_mean = post['p'].values.mean(axis=(0,1))
         if p_mean is None:
-            probs_dict = softmax_model.predict_probs()
+            probs_dict = assignment_model.predict_probs()
             p_mean = np.zeros_like(mask, dtype=float)
             for i, pid in enumerate(peak_ids_array):
                 vec = probs_dict.get(int(pid))
@@ -373,7 +371,7 @@ def run_annotation_experiment(
             features_dict[int(pid)] = feats
         
         # Get probability predictions
-        probs_dict = softmax_model.predict_probs()
+        probs_dict = assignment_model.predict_probs()
         available_probs = {pid: probs_dict[pid] for pid in available_peaks}
         
         # Handle special case for random selection
@@ -400,7 +398,7 @@ def run_annotation_experiment(
             # Get posterior samples if using MI
             prob_samples_dict = None
             if acquisition_fn == 'mi':
-                prob_samples_dict = softmax_model.predict_prob_samples()
+                prob_samples_dict = assignment_model.predict_prob_samples()
                 prob_samples_dict = {pid: prob_samples_dict[pid] for pid in available_peaks}
             
             # Use active learning selector
@@ -417,7 +415,7 @@ def run_annotation_experiment(
         
         # Run annotation round
         round_results = simulate_annotation_round(
-            softmax_model=softmax_model,
+            assignment_model=assignment_model,
             oracle=oracle,
             batch_peak_ids=batch_peaks,
             peak_df=peak_df,
@@ -455,7 +453,7 @@ def run_annotation_experiment(
 
 
 def compare_oracles(
-    softmax_model: PeakAssignmentSoftmaxModel,
+    assignment_model: PeakAssignment,
     oracles: List[Oracle],
     peak_df: pd.DataFrame,
     compound_mass: np.ndarray,
@@ -469,7 +467,7 @@ def compare_oracles(
     
     Parameters
     ----------
-    softmax_model : PeakAssignmentSoftmaxModel
+    assignment_model : PeakAssignment
         Base model (will be copied for each oracle)
     oracles : List[Oracle]
         Oracles to compare
@@ -499,16 +497,15 @@ def compare_oracles(
         print(f"{'='*80}")
         
         # Create a fresh model for each oracle to avoid contamination
-        fresh_model = PeakAssignmentSoftmaxModel(
-            mass_tolerance=softmax_model.mass_tolerance,
-            rt_window_k=softmax_model.rt_window_k,
-            use_temperature=softmax_model.use_temperature,
-            standardize_features=softmax_model.standardize_features,
-            random_seed=softmax_model.random_seed
+        fresh_model = PeakAssignment(
+            mass_tolerance=assignment_model.mass_tolerance,
+            rt_window_k=assignment_model.rt_window_k,
+            use_minimal_features=assignment_model.use_minimal_features,
+            random_seed=assignment_model.random_seed
         )
         
         # Copy RT predictions
-        fresh_model.rt_predictions = softmax_model.rt_predictions
+        fresh_model.rt_predictions = assignment_model.rt_predictions
         
         # Regenerate training data with fresh presence priors
         n_species = len(np.unique(peak_df['species']))
@@ -528,7 +525,7 @@ def compare_oracles(
         fresh_model.sample(draws=1000, tune=1000, chains=4)  # Quick initial sampling
         
         oracle_results = run_annotation_experiment(
-            softmax_model=fresh_model,
+            assignment_model=fresh_model,
             oracle=oracle,
             peak_df=peak_df,
             compound_mass=compound_mass,

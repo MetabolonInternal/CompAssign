@@ -17,7 +17,7 @@ from dataclasses import dataclass, asdict
 # Add parent to path
 sys.path.append(str(Path(__file__).parent.parent))
 
-from src.compassign.peak_assignment_softmax import PeakAssignmentSoftmaxModel
+from src.compassign.peak_assignment import PeakAssignment
 from src.compassign.presence_prior import PresencePrior
 from src.compassign.oracles import (
     OptimalOracle, NoisyOracle, ProbabilisticOracle, 
@@ -48,7 +48,7 @@ def setup_sweet_spot_model_with_data(n_species=3, n_compounds=60, n_peaks_per_sp
 
     Returns
     -------
-    model : PeakAssignmentSoftmaxModel
+    model : PeakAssignment
     peaks_df : pd.DataFrame
     compound_mass : np.ndarray (theoretical masses indexed by compound_id)
     """
@@ -65,11 +65,10 @@ def setup_sweet_spot_model_with_data(n_species=3, n_compounds=60, n_peaks_per_sp
     )
 
     # Prepare model with permissive candidate filters to allow multi-candidates
-    model = PeakAssignmentSoftmaxModel(
+    model = PeakAssignment(
         mass_tolerance=0.15,  # Must match generator tolerance scale
         rt_window_k=2.0,
-        use_temperature=True,
-        standardize_features=True,
+        use_minimal_features=True,
         random_seed=seed,
     )
 
@@ -293,11 +292,10 @@ def setup_realistic_model_with_data(n_species=5, n_compounds=100, n_peaks_per_sp
     peak_df = pd.DataFrame(peak_list)
     
     # Setup model with realistic tolerances
-    model = PeakAssignmentSoftmaxModel(
+    model = PeakAssignment(
         mass_tolerance=0.01,  # 10 ppm tolerance
         rt_window_k=2.5,  # Tighter RT window since predictions are worse
-        use_temperature=True,
-        standardize_features=True,
+        use_minimal_features=True,
         random_seed=seed
     )
     
@@ -404,11 +402,10 @@ def setup_model_with_data(n_species=3, n_compounds=60, n_peaks_per_species=150,
     peak_df = pd.DataFrame(peak_list)
     
     # Setup model
-    model = PeakAssignmentSoftmaxModel(
+    model = PeakAssignment(
         mass_tolerance=0.005,
         rt_window_k=3.0,
-        use_temperature=True,
-        standardize_features=True,
+        use_minimal_features=True,
         random_seed=seed
     )
     

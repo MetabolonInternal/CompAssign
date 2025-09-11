@@ -9,7 +9,7 @@ __version__ = "1.0.0"
 __author__ = "Metabolon CompAssign Team"
 
 from .rt_hierarchical import HierarchicalRTModel
-from .peak_assignment_softmax import PeakAssignmentSoftmaxModel, SoftmaxAssignmentResults
+from .peak_assignment import PeakAssignment, AssignmentResults
 from .presence_prior import PresencePrior
 from .oracles import (
     Oracle, OptimalOracle, RandomOracle, NoisyOracle,
@@ -23,8 +23,8 @@ from .eval_loop import (
 
 __all__ = [
     "HierarchicalRTModel",
-    "PeakAssignmentSoftmaxModel",
-    "SoftmaxAssignmentResults",
+    "PeakAssignment",
+    "AssignmentResults",
     "PresencePrior",
     "Oracle",
     "OptimalOracle",
