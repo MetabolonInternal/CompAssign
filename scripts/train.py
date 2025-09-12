@@ -48,6 +48,8 @@ def parse_args():
                        help='Number of compound classes')
     parser.add_argument('--n-compounds', type=int, default=20,
                        help='Number of compounds')
+    parser.add_argument('--decoy-fraction', type=float, default=0.5,
+                       help='Fraction of compounds that are decoys (never appear in samples)')
     
     # Sampling parameters
     parser.add_argument('--n-samples', type=int, default=1000,
@@ -143,7 +145,7 @@ def main():
         near_isobar_fraction=0.3,  # 30% are near-isobars (increased)
         mass_error_std=0.004,  # Higher mass error for more overlap
         rt_uncertainty_range=(0.2, 0.8),  # Higher RT uncertainty
-        decoy_fraction=0.5  # 50% of compounds are decoys (never appear in samples!)
+        decoy_fraction=args.decoy_fraction  # Use command-line parameter
     )
     
     # Adapt to expected format
@@ -252,6 +254,7 @@ def main():
         compound_mass=compound_info['true_mass'].values,
         n_compounds=args.n_compounds,
         species_cluster=hierarchical_params['species_cluster'],
+        compound_info=compound_info,  # Pass compound_info to skip decoys during training
         initial_labeled_fraction=0.8  # 80% labeled for training
     )
     
@@ -287,6 +290,43 @@ def main():
     
     # Save compound information (including decoy status)
     compound_info.to_csv(output_path / "results" / "compound_info.csv", index=False)
+    
+    # Analyze confidence distributions for real vs decoy assignments
+    if 'is_decoy' in compound_info.columns and results.peaks_by_compound:
+        decoy_ids = set(compound_info[compound_info['is_decoy']]['compound_id'].values)
+        real_ids = set(compound_info[~compound_info['is_decoy']]['compound_id'].values)
+        
+        decoy_probs = []
+        real_probs = []
+        
+        for cid, peak_ids in results.peaks_by_compound.items():
+            for pid in peak_ids:
+                prob = results.top_prob.get(pid, 0.0)
+                if cid in decoy_ids:
+                    decoy_probs.append(prob)
+                elif cid in real_ids:
+                    real_probs.append(prob)
+        
+        # Save confidence analysis
+        confidence_stats = {
+            'real_assignments': {
+                'count': len(real_probs),
+                'mean_confidence': np.mean(real_probs) if real_probs else 0,
+                'std_confidence': np.std(real_probs) if real_probs else 0,
+                'min_confidence': min(real_probs) if real_probs else 0,
+                'max_confidence': max(real_probs) if real_probs else 0
+            },
+            'decoy_assignments': {
+                'count': len(decoy_probs),
+                'mean_confidence': np.mean(decoy_probs) if decoy_probs else 0,
+                'std_confidence': np.std(decoy_probs) if decoy_probs else 0,
+                'min_confidence': min(decoy_probs) if decoy_probs else 0,
+                'max_confidence': max(decoy_probs) if decoy_probs else 0
+            }
+        }
+        
+        with open(output_path / "results" / "confidence_analysis.json", 'w') as f:
+            json.dump(confidence_stats, f, indent=2)
     
     # Save metrics
     metrics = {
@@ -364,10 +404,39 @@ def main():
     print_flush(f"  Mean Coverage:      {metrics['mean_coverage']:.3f}")
     
     # Show decoy statistics if available
-    if results.compound_metrics.get('decoys_assigned', 0) > 0:
+    n_decoys = len(compound_info[compound_info['is_decoy']]) if 'is_decoy' in compound_info.columns else 0
+    n_real = len(compound_info[~compound_info['is_decoy']]) if 'is_decoy' in compound_info.columns else len(compound_info)
+    decoys_assigned = results.compound_metrics.get('decoys_assigned', 0)
+    
+    if n_decoys > 0:
         print_flush(f"\nDecoy detection:")
-        print_flush(f"  Decoys incorrectly assigned: {results.compound_metrics['decoys_assigned']}")
+        print_flush(f"  Library composition: {n_real} real, {n_decoys} decoys")
+        print_flush(f"  Decoys incorrectly assigned: {decoys_assigned}/{n_decoys} ({decoys_assigned/n_decoys*100:.1f}%)")
+        print_flush(f"  False positives from decoys: {decoys_assigned}")
         print_flush(f"  False positives (total): {results.compound_metrics.get('false_positives', 0)}")
+        
+        # Show which decoys were assigned if any
+        if decoys_assigned > 0 and hasattr(results, 'peaks_by_compound'):
+            decoy_ids = set(compound_info[compound_info['is_decoy']]['compound_id'].values)
+            assigned_decoys = [cid for cid in results.peaks_by_compound.keys() if cid in decoy_ids]
+            if assigned_decoys:
+                print_flush(f"  Decoy IDs assigned: {sorted(assigned_decoys)[:5]}{'...' if len(assigned_decoys) > 5 else ''}")
+        
+        # Show confidence analysis if available
+        if Path(output_path / "results" / "confidence_analysis.json").exists():
+            with open(output_path / "results" / "confidence_analysis.json") as f:
+                conf_stats = json.load(f)
+            
+            if conf_stats['real_assignments']['count'] > 0:
+                print_flush(f"\nConfidence analysis:")
+                print_flush(f"  Real compound assignments:")
+                print_flush(f"    Mean confidence: {conf_stats['real_assignments']['mean_confidence']:.3f}")
+                print_flush(f"    Range: [{conf_stats['real_assignments']['min_confidence']:.3f}, {conf_stats['real_assignments']['max_confidence']:.3f}]")
+            
+            if conf_stats['decoy_assignments']['count'] > 0:
+                print_flush(f"  Decoy compound assignments:")
+                print_flush(f"    Mean confidence: {conf_stats['decoy_assignments']['mean_confidence']:.3f}")
+                print_flush(f"    Range: [{conf_stats['decoy_assignments']['min_confidence']:.3f}, {conf_stats['decoy_assignments']['max_confidence']:.3f}]")
     
     print_flush(f"\nPeak-level performance:")
     print_flush(f"  Peak Precision: {metrics['precision']:.3f} ({metrics['precision']*100:.1f}%)")

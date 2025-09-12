@@ -177,6 +177,7 @@ class PeakAssignment:
                               compound_mass: np.ndarray,
                               n_compounds: int,
                               species_cluster: np.ndarray,
+                              compound_info: Optional[pd.DataFrame] = None,
                               init_presence: Optional[PresencePrior] = None,
                               initial_labeled_fraction: float = 0.0,
                               random_seed: Optional[int] = None) -> Dict[str, Any]:
@@ -186,10 +187,9 @@ class PeakAssignment:
         if not self.rt_predictions:
             raise ValueError("RT predictions not computed. Run compute_rt_predictions first.")
         
-        print(f"\nGenerating HIERARCHICAL BAYESIAN training data...")
-        print(f"  Mass tolerance: ±{self.mass_tolerance} Da")
-        print(f"  RT window: ±{self.rt_window_k}σ")
-        print(f"  Minimal features: {self.use_minimal_features}")
+        print(f"\nGenerating training data...")
+        
+        # Count decoys if present (will be printed later)
         
         # Initialize presence prior if not provided
         n_species = len(np.unique(peak_df['species']))
@@ -202,7 +202,9 @@ class PeakAssignment:
         species_medians = peak_df.groupby('species')['intensity'].median()
         
         # Collect candidates for each peak
-        peak_candidates = []
+        # We'll generate TWO sets: training (no decoys) and test (all compounds)
+        peak_candidates_train = []  # Training candidates (no decoys)
+        peak_candidates_test = []   # Test candidates (all compounds)
         peak_labels = []
         peak_species = []
         peak_ids = []
@@ -221,11 +223,16 @@ class PeakAssignment:
             intensity = peak['intensity']
             median_intensity = species_medians[s]
             
-            # Find candidates by mass
-            candidates = []
-            features = []
+            # Find candidates by mass - TRAINING SET (no decoys)
+            candidates_train = []
+            features_train = []
             
             for m in range(n_compounds):
+                # Skip decoys during training to prevent data leakage
+                if compound_info is not None and 'is_decoy' in compound_info.columns:
+                    if compound_info.iloc[m]['is_decoy']:
+                        continue
+                
                 mass_error_da = abs(mz - compound_mass[m])
                 if mass_error_da > self.mass_tolerance:
                     continue
@@ -274,26 +281,88 @@ class PeakAssignment:
                         log_relative_intensity
                     ]
                 
-                candidates.append(m)
-                features.append(feat)
+                candidates_train.append(m)
+                features_train.append(feat)
             
-            # Store candidate info
-            peak_candidates.append((candidates, features))
+            # Find candidates - TEST SET (all compounds including decoys)
+            candidates_test = []
+            features_test = []
+            
+            for m in range(n_compounds):
+                # Include ALL compounds for test evaluation
+                mass_error_da = abs(mz - compound_mass[m])
+                if mass_error_da > self.mass_tolerance:
+                    continue
+                
+                mass_error_ppm = (mz - compound_mass[m]) / compound_mass[m] * 1e6
+                
+                # RT filtering
+                rt_pred_mean, rt_pred_std = self.rt_predictions[(s, m)]
+                
+                if rt_pred_std > 0.01:
+                    rt_z = (rt - rt_pred_mean) / rt_pred_std
+                else:
+                    rt_z = (rt - rt_pred_mean) / 0.01
+                
+                if abs(rt_z) > self.rt_window_k:
+                    continue
+                
+                # Build same features for test candidates
+                if self.use_minimal_features:
+                    feat = [
+                        mass_error_ppm,
+                        rt_z,
+                        np.log1p(intensity),
+                        np.log(rt_pred_std + 1e-6)
+                    ]
+                else:
+                    log_intensity = np.log1p(intensity)
+                    mass_confidence = np.exp(-abs(mass_error_ppm) / 10)
+                    rt_confidence = np.exp(-abs(rt_z) / 3)
+                    combined_confidence = mass_confidence * rt_confidence
+                    log_compound_mass = np.log(compound_mass[m])
+                    log_rt_uncertainty = np.log(rt_pred_std + 1e-6)
+                    log_relative_intensity = np.log1p(intensity / median_intensity) if median_intensity > 0 else 0
+                    
+                    feat = [
+                        mass_error_ppm,
+                        rt_z,
+                        log_intensity,
+                        mass_confidence,
+                        rt_confidence,
+                        combined_confidence,
+                        log_compound_mass,
+                        log_rt_uncertainty,
+                        log_relative_intensity
+                    ]
+                
+                candidates_test.append(m)
+                features_test.append(feat)
+            
+            # Store both candidate sets
+            peak_candidates_train.append((candidates_train, features_train))
+            peak_candidates_test.append((candidates_test, features_test))
             peak_species.append(s)
             peak_ids.append(peak_id)
             
             # Determine label (0 for null, 1+ for compound position)
             if true_comp is None:
                 peak_labels.append(0)  # Null
-            elif true_comp in candidates:
-                peak_labels.append(candidates.index(true_comp) + 1)  # 1-indexed position
+            elif true_comp in candidates_train:
+                peak_labels.append(candidates_train.index(true_comp) + 1)  # 1-indexed position
             else:
                 # True compound not in candidates (filtered out)
                 peak_labels.append(-1)  # Will be masked in training
         
-        # Find maximum number of candidates
-        max_candidates = max(len(cands[0]) for cands in peak_candidates) if peak_candidates else 0
-        self.K_max = max_candidates + 1  # +1 for null class
+        # Find maximum number of candidates for both sets
+        max_candidates_train = max(len(cands[0]) for cands in peak_candidates_train) if peak_candidates_train else 0
+        max_candidates_test = max(len(cands[0]) for cands in peak_candidates_test) if peak_candidates_test else 0
+        
+        # Use the MAXIMUM of both for the model architecture
+        # This ensures the model can handle both training and test candidates
+        self.K_max = max(max_candidates_train, max_candidates_test) + 1  # +1 for null class
+        self.K_max_train = max_candidates_train + 1  # For training-specific operations
+        self.K_max_test = max_candidates_test + 1  # For test-specific operations
         
         # Determine number of features
         n_features = 4 if self.use_minimal_features else 9
@@ -308,51 +377,75 @@ class PeakAssignment:
                 'log_compound_mass', 'log_rt_uncertainty', 'log_relative_intensity'
             ]
         
-        print(f"\nCandidate statistics:")
-        print(f"  Number of peaks: {len(peak_candidates)}")
-        print(f"  Max candidates per peak: {self.K_max - 1} (+ null)")
-        print(f"  Features per candidate: {n_features}")
-        print(f"  Feature names: {', '.join(self.feature_names)}")
+        # Log simplified statistics
+        if compound_info is not None and 'is_decoy' in compound_info.columns:
+            n_decoys = compound_info['is_decoy'].sum()
+            print(f"  Excluding {n_decoys} decoy compounds from training")
+        print(f"  Model slots: {self.K_max} ({self.K_max_train} used in training, {self.K_max_test} in test)")
         
-        # Build padded tensors
-        N = len(peak_candidates)
-        X = np.zeros((N, self.K_max, n_features), dtype=np.float32)
-        mask = np.zeros((N, self.K_max), dtype=bool)
+        # Build padded tensors for BOTH training and test
+        # Both use self.K_max (the maximum) for consistent model architecture
+        N = len(peak_candidates_train)
+        # Training tensors
+        X_train = np.zeros((N, self.K_max, n_features), dtype=np.float32)
+        mask_train = np.zeros((N, self.K_max), dtype=bool)
+        
+        # Test tensors (same dimensions as training for model compatibility)
+        X_test = np.zeros((N, self.K_max, n_features), dtype=np.float32)
+        mask_test = np.zeros((N, self.K_max), dtype=bool)
+        
         true_labels = np.array(peak_labels, dtype=np.int32)
         labels = np.full_like(true_labels, -1, dtype=np.int32)
         
-        # Mappings
+        # Mappings for both sets
         peak_to_row = {pid: i for i, pid in enumerate(peak_ids)}
-        row_to_candidates = []
+        row_to_candidates_train = []
+        row_to_candidates_test = []
         
-        # Fill padded tensors
-        for i, ((candidates, features), s) in enumerate(zip(peak_candidates, peak_species)):
-            # First slot is always null
-            mask[i, 0] = True
-            row_to_candidates.append([None] + candidates)  # None for null
+        # Fill padded tensors for both training and test
+        for i, (train_data, test_data, s) in enumerate(zip(peak_candidates_train, peak_candidates_test, peak_species)):
+            candidates_train, features_train = train_data
+            candidates_test, features_test = test_data
             
-            # Fill candidate features
-            for k, feat in enumerate(features, start=1):
-                X[i, k, :] = feat
-                mask[i, k] = True
+            # Store mappings
+            row_to_candidates_train.append([None] + candidates_train)  # None for null
+            row_to_candidates_test.append([None] + candidates_test)  # None for null
+            
+            # Fill training tensors
+            mask_train[i, 0] = True  # Null slot
+            for k, feat in enumerate(features_train, start=1):
+                X_train[i, k, :] = feat
+                mask_train[i, k] = True
+            
+            # Fill test tensors
+            mask_test[i, 0] = True  # Null slot
+            for k, feat in enumerate(features_test, start=1):
+                X_test[i, k, :] = feat
+                mask_test[i, k] = True
         
-        # Standardize features
-        print("  Standardizing features...")
+        # Standardize features using TRAINING data statistics
         valid_features = []
         for i in range(N):
             for k in range(1, self.K_max):  # Skip null slot
-                if mask[i, k]:
-                    valid_features.append(X[i, k, :])
+                if mask_train[i, k]:
+                    valid_features.append(X_train[i, k, :])
         
         if len(valid_features) > 0:
             valid_features = np.array(valid_features)
             self.feature_scaler.fit(valid_features)
             
-            # Apply standardization
+            # Apply standardization to BOTH train and test tensors
+            # Training tensors
             for i in range(N):
                 for k in range(1, self.K_max):
-                    if mask[i, k]:
-                        X[i, k, :] = self.feature_scaler.transform(X[i, k, :].reshape(1, -1))[0]
+                    if mask_train[i, k]:
+                        X_train[i, k, :] = self.feature_scaler.transform(X_train[i, k, :].reshape(1, -1))[0]
+            
+            # Test tensors (using same scaler fitted on training data)
+            for i in range(N):
+                for k in range(1, self.K_max):
+                    if mask_test[i, k]:
+                        X_test[i, k, :] = self.feature_scaler.transform(X_test[i, k, :].reshape(1, -1))[0]
         
         # Optionally reveal a small seed set of labels
         if initial_labeled_fraction > 0:
@@ -363,14 +456,17 @@ class PeakAssignment:
                 seed_idx = rng.choice(valid_idx, size=min(n_seed, len(valid_idx)), replace=False)
                 labels[seed_idx] = true_labels[seed_idx]
         
-        # Store training pack
+        # Store training pack with BOTH train and test tensors
         self.train_pack = {
-            'X': X,
-            'mask': mask,
+            'X': X_train,  # Training features (no decoys)
+            'mask': mask_train,  # Training mask
+            'X_test': X_test,  # Test features (includes decoys)
+            'mask_test': mask_test,  # Test mask
             'labels': labels,
             'true_labels': true_labels,
             'peak_to_row': peak_to_row,
-            'row_to_candidates': row_to_candidates,
+            'row_to_candidates': row_to_candidates_train,  # Training candidates (no decoys)
+            'row_to_candidates_test': row_to_candidates_test,  # Test candidates (all)
             'peak_species': np.array(peak_species),
             'peak_ids': np.array(peak_ids),
             'n_compounds': n_compounds,
@@ -386,10 +482,7 @@ class PeakAssignment:
         if not self.train_pack:
             raise ValueError("Training data not generated. Run generate_training_data first.")
         
-        print(f"\nBuilding HIERARCHICAL BAYESIAN model")
-        print(f"  Features: {len(self.feature_names)}")
-        print(f"  Max candidates: {self.K_max}")
-        print(f"  Uncertainty: Hierarchical Normal")
+        # Building model
         
         X = self.train_pack['X']
         mask = self.train_pack['mask']
@@ -477,8 +570,7 @@ class PeakAssignment:
         if self.model is None:
             raise ValueError("Model not built. Call build_model first.")
         
-        print(f"\nSampling HIERARCHICAL BAYESIAN model with {chains} chains, {draws} samples each...")
-        print(f"  Uncertainty: Hierarchical Normal")
+        print(f"\nSampling model with {chains} chains, {draws} samples each...")
         
         with self.model:
             self.trace = pm.sample(
@@ -492,25 +584,101 @@ class PeakAssignment:
         
         return self.trace
     
-    def predict_probs(self) -> Dict[int, np.ndarray]:
-        """Compute posterior predictive probabilities for each peak."""
+    def predict_probs(self, use_test_candidates: bool = True) -> Dict[int, np.ndarray]:
+        """Compute posterior predictive probabilities for each peak.
+        
+        Parameters
+        ----------
+        use_test_candidates : bool
+            If True, compute probabilities for test candidates (includes decoys).
+            If False, use training candidates (no decoys).
+        """
         if self.trace is None:
             raise ValueError("No trace available. Run sample first.")
         
-        print("\nComputing posterior predictive probabilities...")
-        
-        # Get posterior samples
-        post = self.trace.posterior
-        
-        # Average probabilities across chains and draws
-        p_samples = post['p'].values  # Shape: (chains, draws, N, K_max)
-        p_mean = p_samples.mean(axis=(0, 1))  # Shape: (N, K_max)
+        # For test evaluation, we need to compute probabilities on test tensors
+        if use_test_candidates and 'X_test' in self.train_pack:
+            # Compute probabilities for test candidates
+            X = self.train_pack['X_test']
+            mask = self.train_pack['mask_test']
+            K_max = self.K_max  # Using unified dimension
+            
+            # Get model parameters from trace
+            post = self.trace.posterior
+            theta_features_samples = post['theta_features'].values  # Shape: (chains, draws, n_features)
+            theta0_samples = post['theta0'].values  # Shape: (chains, draws)
+            theta_null_samples = post['theta_null'].values  # Shape: (chains, draws)
+            
+            # Compute logits for test features
+            N = X.shape[0]
+            chains, draws = theta_features_samples.shape[:2]
+            
+            # Compute presence priors for test candidates
+            peak_species = self.train_pack['peak_species']
+            log_pi_null = self.presence.log_prior_null()
+            candidates_map = self.train_pack['row_to_candidates_test']
+            
+            # Build presence prior matrix for test candidates
+            presence_matrix_test = np.zeros((N, self.K_max), dtype='float32')
+            for i in range(N):
+                s = peak_species[i]
+                candidates = candidates_map[i]
+                log_pi_compounds = self.presence.log_prior_odds(s)
+                
+                presence_matrix_test[i, 0] = log_pi_null  # Null prior
+                for k in range(1, self.K_max):
+                    if mask[i, k] and k < len(candidates):
+                        c = candidates[k]
+                        if c is not None:
+                            presence_matrix_test[i, k] = log_pi_compounds[c]
+            
+            # Initialize probabilities
+            p_test = np.zeros((chains, draws, N, self.K_max))
+            
+            for chain in range(chains):
+                for draw in range(draws):
+                    theta_features = theta_features_samples[chain, draw]
+                    theta0 = theta0_samples[chain, draw]
+                    theta_null = theta_null_samples[chain, draw]
+                    
+                    # Compute logits WITH presence priors
+                    logits = np.zeros((N, self.K_max))
+                    logits[:, 0] = theta_null + presence_matrix_test[:, 0]  # Null class with prior
+                    
+                    for i in range(N):
+                        for k in range(1, self.K_max):
+                            if mask[i, k]:
+                                # Include presence prior in logits
+                                logits[i, k] = theta0 + np.dot(X[i, k], theta_features) + presence_matrix_test[i, k]
+                            else:
+                                logits[i, k] = -np.inf  # Masked out
+                    
+                    # Apply softmax with masking
+                    for i in range(N):
+                        valid_mask = mask[i]
+                        valid_logits = logits[i, valid_mask]
+                        
+                        # Softmax
+                        exp_logits = np.exp(valid_logits - np.max(valid_logits))
+                        probs = exp_logits / exp_logits.sum()
+                        
+                        p_test[chain, draw, i, valid_mask] = probs
+            
+            # Average across chains and draws
+            p_mean = p_test.mean(axis=(0, 1))
+        else:
+            # Use training probabilities (original behavior)
+            post = self.trace.posterior
+            p_samples = post['p'].values  # Shape: (chains, draws, N, K_max)
+            p_mean = p_samples.mean(axis=(0, 1))  # Shape: (N, K_max)
+            mask = self.train_pack['mask']
+            candidates_map = self.train_pack['row_to_candidates']
         
         # Map to peak IDs
         peak_probs = {}
         for i, peak_id in enumerate(self.train_pack['peak_ids']):
             # Extract valid probabilities (where mask is True)
-            mask_i = self.train_pack['mask'][i]
+            mask_i = mask[i]
             valid_probs = p_mean[i, mask_i]
             
             # Renormalize (should already sum to 1, but ensure numerical stability)
@@ -541,8 +709,14 @@ class PeakAssignment:
         
         # Silent - no printing in library code
         
-        # Get probabilities
-        peak_probs = self.predict_probs()
+        # Get probabilities using TEST candidates (includes decoys)
+        peak_probs = self.predict_probs(use_test_candidates=True)
+        
+        # Use test candidate mappings if available
+        if 'row_to_candidates_test' in self.train_pack:
+            candidates_map = self.train_pack['row_to_candidates_test']
+        else:
+            candidates_map = self.train_pack['row_to_candidates']
         
         # Make assignments
         assignments = {}
@@ -559,7 +733,7 @@ class PeakAssignment:
             if best_prob >= prob_threshold and best_idx > 0:
                 # Get compound from mapping
                 row = self.train_pack['peak_to_row'][peak_id]
-                candidates = self.train_pack['row_to_candidates'][row]
+                candidates = candidates_map[row]
                 assignments[peak_id] = candidates[best_idx]
             else:
                 # Either null or below threshold
@@ -568,6 +742,7 @@ class PeakAssignment:
         # Get ground truth
         true_labels = self.train_pack.get('true_labels', self.train_pack['labels'])
         peak_ids = self.train_pack['peak_ids']
+        # Use training candidates for ground truth (they match the labels)
         row_to_candidates = self.train_pack['row_to_candidates']
         
         # Build mappings for many-to-one evaluation
