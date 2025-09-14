@@ -26,35 +26,44 @@ from .presence_prior import PresencePrior
 
 @dataclass
 class AssignmentResults:
-    """Container for peak assignment results with many-to-one support."""
-    assignments: Dict[int, Optional[int]]  # peak_id -> compound_id or None
+    """Container for peak assignment results (many-to-many by default)."""
+    # Predictions
+    assignments: Dict[int, List[int]]  # peak_id -> list of predicted compound_ids (may be empty)
     top_prob: Dict[int, float]  # peak_id -> max probability
     per_peak_probs: Dict[int, np.ndarray]  # peak_id -> [p_null, p_c1, ...]
-    
-    # Peak-level metrics (many-to-one aware)
-    precision: float  # Peak-level precision
-    recall: float  # Peak-level recall
-    f1: float  # Peak-level F1
-    confusion_matrix: Dict[str, int]  # TP, FP, TN, FN
-    
-    # Compound-level metrics (PRIMARY)
-    compound_precision: float  # What fraction of predicted compounds are correct?
-    compound_recall: float  # What fraction of true compounds were found?
-    compound_f1: float  # Harmonic mean of compound P/R
-    compound_metrics: Dict[str, Any]  # Additional compound-level stats
-    
+
+    # Pair-based (micro) metrics over (peak, compound) pairs
+    precision: float
+    recall: float
+    f1: float
+    confusion_matrix: Dict[str, int]  # TP, FP, FN at pair level
+
+    # Peak-level set metrics (macro)
+    f1_macro: float
+    jaccard_macro: float
+    far_null: float
+    tnr_null: float
+    assignment_rate: float
+
+    # Compound-level identification (decoy-aware)
+    compound_precision: float
+    compound_recall: float
+    compound_f1: float
+    compound_metrics: Dict[str, Any]
+
     # Coverage metrics
-    coverage_per_compound: Dict[int, float]  # compound_id -> fraction of peaks found
-    mean_coverage: float  # Average coverage across all compounds
-    
+    coverage_per_compound: Dict[int, float]
+    mean_coverage: float
+
     # Calibration
-    ece: float  # Expected Calibration Error
+    ece: float  # Pairwise ECE (micro)
     ece_ovr: float  # Macro OVR-ECE across classes
     brier_ovr: float  # OVR Brier score across classes
-    
+    cardinality_mae: float  # Mean abs error of set sizes
+
     # Groupings for analysis
-    peaks_by_compound: Dict[int, List[int]]  # compound_id -> list of peak_ids assigned to it
-    true_peaks_by_compound: Dict[int, List[int]]  # compound_id -> list of true peak_ids
+    peaks_by_compound: Dict[int, List[int]]
+    true_peaks_by_compound: Dict[int, List[int]]
 
 
 class PeakAssignment:
@@ -666,12 +675,15 @@ class PeakAssignment:
         
         return peak_probs
     
-    def assign(self, prob_threshold: float = 0.5, eval_peak_ids: Optional[set] = None, 
-               compound_info: Optional[pd.DataFrame] = None) -> AssignmentResults:
+    def assign(self, prob_threshold: float = 0.5,
+               eval_peak_ids: Optional[set] = None,
+               compound_info: Optional[pd.DataFrame] = None,
+               max_predictions_per_peak: Optional[int] = 2) -> AssignmentResults:
         """
-        Assign compounds to peaks with many-to-one support.
-        Now properly evaluates multiple peaks from the same compound as all correct.
-        Also properly accounts for decoy compounds as false positives.
+        Assign compounds to peaks with many-to-many support (default).
+        Builds predicted sets per peak using a probability threshold and optional top-k cap,
+        then computes pair-based micro metrics, peak-level macro metrics, compound-level
+        identification, coverage, and calibration.
         
         Parameters
         ----------
@@ -696,8 +708,8 @@ class PeakAssignment:
         else:
             candidates_map = self.train_pack['row_to_candidates']
         
-        # Make assignments
-        assignments = {}
+        # Make assignments (many-to-many)
+        assignments: Dict[int, List[int]] = {}
         top_probs = {}
         
         for peak_id, probs in peak_probs.items():
@@ -707,15 +719,25 @@ class PeakAssignment:
             
             top_probs[peak_id] = best_prob
             
-            # Check threshold and null
-            if best_prob >= prob_threshold and best_idx > 0:
-                # Get compound from mapping
-                row = self.train_pack['peak_to_row'][peak_id]
-                candidates = candidates_map[row]
-                assignments[peak_id] = candidates[best_idx]
-            else:
-                # Either null or below threshold
-                assignments[peak_id] = None
+            row = self.train_pack['peak_to_row'][peak_id]
+            candidates = candidates_map[row]
+            # Gather non-null candidates meeting threshold
+            mask_row = (self.train_pack.get('mask_test', self.train_pack['mask']))[row]
+            valid_idx = np.where(mask_row)[0]
+            cand_entries = []
+            for j, k in enumerate(valid_idx):
+                if k == 0:
+                    continue
+                c = candidates[k]
+                if c is None:
+                    continue
+                p = float(probs[j])
+                if p >= prob_threshold:
+                    cand_entries.append((int(c), p))
+            cand_entries.sort(key=lambda x: x[1], reverse=True)
+            if max_predictions_per_peak is not None and max_predictions_per_peak > 0:
+                cand_entries = cand_entries[:max_predictions_per_peak]
+            assignments[peak_id] = [cid for cid, _ in cand_entries]
         
         # Get ground truth
         true_labels = self.train_pack.get('true_labels', self.train_pack['labels'])
@@ -726,7 +748,7 @@ class PeakAssignment:
         row_to_candidates = self.train_pack['row_to_candidates']
         train_labels = self.train_pack.get('labels', np.full_like(true_labels, -1))
         
-        # Build mappings for many-to-one evaluation
+        # Build mappings for compound-level evaluation
         true_peaks_by_compound = defaultdict(list)
         pred_peaks_by_compound = defaultdict(list)
 
@@ -742,20 +764,26 @@ class PeakAssignment:
             if train_labels[i] >= 0:
                 continue  # skip training-labeled peaks
 
-            pred = assignments.get(peak_id)
+            preds = assignments.get(peak_id, [])
             true_comp = true_compounds[i] if true_compounds is not None else None
             if pd.notna(true_comp) if isinstance(true_comp, (np.floating, float)) else (true_comp is not None):
                 true_comp = int(true_comp)
                 true_peaks_by_compound[true_comp].append(peak_id)
 
             # Track predicted compounds
-            if pred is not None:
-                pred_peaks_by_compound[pred].append(peak_id)
+            for pred in preds:
+                pred_peaks_by_compound[int(pred)].append(peak_id)
         
-        # SECOND PASS: Calculate peak-level metrics (test peaks only)
-        tp = fp = fn = tn = 0
-        all_probs = []
-        all_correct = []
+        # SECOND PASS: Build pairwise arrays and peak-level sets (test peaks only)
+        tp = fp = fn = 0
+        pair_probs: List[float] = []
+        pair_labels: List[int] = []
+        ovr_by_class_probs: Dict[int, List[float]] = {}
+        ovr_by_class_labels: Dict[int, List[int]] = {}
+        peak_f1s: List[float] = []
+        peak_jaccards: List[float] = []
+        null_flags: List[int] = []
+        assigned_flags: List[int] = []
         
         # Reuse the same eval_set defined above for peak-level metrics
         
@@ -766,36 +794,74 @@ class PeakAssignment:
             if train_labels[i] >= 0:
                 continue
             
-            pred = assignments.get(peak_id)
-            # Use true compound id directly (may be outside candidate set)
+            preds = set(assignments.get(peak_id, []))
             tc = true_compounds[i] if true_compounds is not None else None
-            true_comp = None if (tc is None or (isinstance(tc, float) and np.isnan(tc))) else int(tc)
-            
-            # CORRECTED Peak-level metrics for many-to-one
-            if true_comp is None:
-                # Noise peak
-                if pred is None:
-                    tn += 1  # Correctly identified as noise
-                else:
-                    fp += 1  # Incorrectly assigned to a compound
+            true_set = set()
+            if isinstance(tc, (list, tuple, np.ndarray)):
+                true_set = {int(x) for x in tc if not (isinstance(x, float) and np.isnan(x))}
             else:
-                # Real peak
-                if pred == true_comp:
-                    tp += 1  # Correctly assigned (many-to-one is OK!)
-                elif pred is None:
-                    fn += 1  # Missed assignment
-                else:
-                    fp += 1  # Wrong compound
-                    fn += 1  # Also counts as missing the true compound
-            
-            # Calibration data
-            all_probs.append(top_probs[peak_id])
-            all_correct.append(1 if pred == true_comp else 0)
-        
-        # Peak-level metrics
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
-        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+                if not (tc is None or (isinstance(tc, float) and np.isnan(tc))):
+                    true_set = {int(tc)}
+
+            # Peak-level set metrics
+            inter = len(preds & true_set)
+            prec_i = inter / len(preds) if len(preds) > 0 else (1.0 if len(true_set) == 0 else 0.0)
+            rec_i = inter / len(true_set) if len(true_set) > 0 else (1.0 if len(preds) == 0 else 0.0)
+            f1_i = (2 * prec_i * rec_i / (prec_i + rec_i)) if (prec_i + rec_i) > 0 else (1.0 if len(preds) == 0 and len(true_set) == 0 else 0.0)
+            union = len(preds | true_set)
+            jacc_i = (inter / union) if union > 0 else 1.0
+            peak_f1s.append(f1_i)
+            peak_jaccards.append(jacc_i)
+            null_flags.append(1 if len(true_set) == 0 else 0)
+            assigned_flags.append(1 if len(preds) > 0 else 0)
+
+            # Pair universe for this peak: all candidate classes plus ensure true classes included
+            mask_i = (self.train_pack.get('mask_test', self.train_pack['mask']))[i]
+            candidates_eval = self.train_pack.get('row_to_candidates_test', self.train_pack['row_to_candidates'])[i]
+            valid_idx = np.where(mask_i)[0]
+            # Map probs for valid non-null slots
+            probs_vec = peak_probs[peak_id]
+            prob_map = {}
+            for j, k in enumerate(valid_idx):
+                if k == 0:
+                    continue
+                c = candidates_eval[k]
+                if c is None:
+                    continue
+                prob_map[int(c)] = float(probs_vec[j])
+            U_i = set(prob_map.keys()) | true_set
+            for c in U_i:
+                y = 1 if c in true_set else 0
+                yhat = 1 if c in preds else 0
+                p = prob_map.get(c, 0.0)
+                if yhat == 1 and y == 1:
+                    tp += 1
+                elif yhat == 1 and y == 0:
+                    fp += 1
+                elif yhat == 0 and y == 1:
+                    fn += 1
+                pair_probs.append(p)
+                pair_labels.append(y)
+                ovr_by_class_probs.setdefault(int(c), []).append(p)
+                ovr_by_class_labels.setdefault(int(c), []).append(y)
+
+        # Pair-based micro metrics
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+
+        # Peak-level macro metrics and null detection
+        f1_macro = float(np.mean(peak_f1s)) if peak_f1s else 0.0
+        jaccard_macro = float(np.mean(peak_jaccards)) if peak_jaccards else 0.0
+        true_null_mask = np.array(null_flags, dtype=bool)
+        assigned_arr = np.array(assigned_flags, dtype=bool)
+        if true_null_mask.any():
+            far_null = float(np.mean(assigned_arr[true_null_mask]))
+            tnr_null = 1.0 - far_null
+        else:
+            far_null = 0.0
+            tnr_null = 1.0
+        assignment_rate = float(np.mean(assigned_arr)) if assigned_arr.size > 0 else 0.0
         
         # COMPOUND-LEVEL METRICS (PRIMARY)
         true_compounds_set = set(true_peaks_by_compound.keys())
@@ -845,54 +911,8 @@ class PeakAssignment:
         
         mean_coverage = np.mean(list(coverage_per_compound.values())) if coverage_per_compound else 0
         
-        # Calculate calibration (Top-1 ECE)
-        ece = self._calculate_ece(np.array(all_probs), np.array(all_correct))
-
-        # Multiclass calibration and scoring (OVR-ECE and Brier)
-        # Build per-class probability/label pairs over the eval test set
-        ovr_by_class_probs = {}
-        ovr_by_class_labels = {}
-        brier_terms = []
-
-        mask_test = self.train_pack.get('mask_test', self.train_pack['mask'])
-        row_to_candidates_eval = self.train_pack.get('row_to_candidates_test', self.train_pack['row_to_candidates'])
-
-        for i, peak_id in enumerate(peak_ids):
-            if int(peak_id) not in eval_set:
-                continue
-            if train_labels[i] >= 0:
-                continue  # test-only
-
-            probs = peak_probs[peak_id]
-            true_tc = true_compounds[i] if true_compounds is not None else None
-            true_comp = None if (true_tc is None or (isinstance(true_tc, float) and np.isnan(true_tc))) else int(true_tc)
-
-            # Align probs with class indices via mask
-            valid_idx = np.where(mask_test[i])[0]
-            candidates = row_to_candidates_eval[i]
-
-            # Accumulate OVR pairs and Brier terms across valid classes
-            for j, k in enumerate(valid_idx):
-                p = float(probs[j])
-                if k == 0:
-                    class_id = -1  # null class
-                    y = 1 if true_comp is None else 0
-                else:
-                    c = candidates[k]
-                    class_id = int(c) if c is not None else None
-                    if class_id is None:
-                        continue
-                    y = 1 if (true_comp is not None and class_id == true_comp) else 0
-
-                # OVR aggregation per class
-                if class_id is not None:
-                    ovr_by_class_probs.setdefault(class_id, []).append(p)
-                    ovr_by_class_labels.setdefault(class_id, []).append(y)
-
-                # Brier OVR term
-                brier_terms.append((p - y) ** 2)
-
-        # Compute macro-averaged OVR-ECE across classes (including null as -1)
+        # Calibration
+        ece = self._calculate_ece(np.array(pair_probs), np.array(pair_labels)) if pair_probs else 0.0
         ece_ovr_vals = []
         for cls, probs_list in ovr_by_class_probs.items():
             labels_list = ovr_by_class_labels.get(cls, [])
@@ -900,9 +920,11 @@ class PeakAssignment:
                 ece_cls = self._calculate_ece(np.array(probs_list), np.array(labels_list))
                 ece_ovr_vals.append(ece_cls)
         ece_ovr = float(np.mean(ece_ovr_vals)) if ece_ovr_vals else 0.0
-
-        # Overall OVR-style Brier score
-        brier_ovr = float(np.mean(brier_terms)) if brier_terms else 0.0
+        brier_ovr = float(np.mean([(p - y) ** 2 for p, y in zip(pair_probs, pair_labels)])) if pair_probs else 0.0
+        # Cardinality calibration
+        # true_set size currently at most 1 in synthetic generation; keep generic formulation
+        cardinality_mae = float(np.mean([abs(len(assignments.get(int(pid), [])) - (0 if (tc is None or (isinstance(tc, float) and np.isnan(tc))) else 1))
+                                         for pid, tc in zip(peak_ids, true_compounds)])) if len(peak_ids) > 0 else 0.0
         
         # Don't print here - let train.py handle all output
         
@@ -910,11 +932,17 @@ class PeakAssignment:
             assignments=assignments,
             top_prob=top_probs,
             per_peak_probs=peak_probs,
-            # Peak-level
+            # Pair-based micro
             precision=precision,
             recall=recall,
             f1=f1,
-            confusion_matrix={'TP': tp, 'FP': fp, 'TN': tn, 'FN': fn},
+            confusion_matrix={'TP': tp, 'FP': fp, 'FN': fn},
+            # Peak-level macro
+            f1_macro=f1_macro,
+            jaccard_macro=jaccard_macro,
+            far_null=far_null,
+            tnr_null=tnr_null,
+            assignment_rate=assignment_rate,
             # Compound-level (PRIMARY)
             compound_precision=compound_precision,
             compound_recall=compound_recall,
@@ -933,6 +961,7 @@ class PeakAssignment:
             ece=ece,
             ece_ovr=ece_ovr,
             brier_ovr=brier_ovr,
+            cardinality_mae=cardinality_mae,
             # Groupings
             peaks_by_compound=dict(pred_peaks_by_compound),
             true_peaks_by_compound=dict(true_peaks_by_compound)

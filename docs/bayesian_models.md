@@ -98,7 +98,7 @@ For each candidate \(c_k \in C_i\), we compute a minimal 4-feature vector (then 
 \mathbf{x}_{ik} = \left[\, \Delta m^{\mathrm{ppm}}_{ik},\ z^{\mathrm{RT}}_{ik},\ \log(1 + I_i),\ \log(\hat{\sigma}_{s(i)c_k} + 10^{-6}) \,\right]^\top
 ```
 
-where \(\Delta m^{\mathrm{ppm}}\) is the mass error in ppm, \(z^{\mathrm{RT}}\) is the RT z-score using the RT model’s predictive mean and variance, and \(I_i\) is the peak intensity. An extended 9-feature variant is available for ablations, but the default model uses the 4-feature set above.
+where \(\Delta m^{\mathrm{ppm}}\) is the mass error in ppm, \(z^{\mathrm{RT}}\) is the RT z-score using the RT model’s predictive mean and variance, and \(I_i\) is the peak intensity. The default model uses the 4-feature set above.
 
 ### 2.2 Likelihood with Hierarchical Uncertainty
 
@@ -144,7 +144,12 @@ Compound presence priors enter as log-offsets:
 \pi_{sc} \sim \operatorname{Beta}(\alpha_{sc}, \beta_{sc}), \quad \log \pi_{s(i), c_k} \text{ added to } \eta_{ik}
 ```
 
-The null class has a separate global prior \(\pi_{\text{null}} \sim \operatorname{Beta}(\alpha_{\text{null}}, \beta_{\text{null}})\). Presence priors are updated online from annotations: positive labels increment \(\alpha_{sc}\), negative labels increment \(\beta_{sc}\).
+The null class has a separate global prior \(\pi_{\text{null}} \sim \operatorname{Beta}(\alpha_{\text{null}}, \beta_{\text{null}})\).
+
+Update policy (as implemented):
+
+- Batch training bootstrap: When a subset of peaks is labeled for supervised training, we increment \(\alpha_{sc}\) once per observed positive (species,compound) pair and increment \(\alpha_{\text{null}}\) for labeled nulls. We do not add batch negatives to avoid bias from incomplete candidate sets.
+- Active learning: Online updates after human annotations increment \(\alpha_{sc}\) for positives and \(\alpha_{\text{null}}\) for null labels. Additionally, a light negative signal is applied to other candidate compounds of the annotated peak (\(\beta_{s c'}\) receives a small increment; default weight 0.25) to reflect “not chosen” among shown alternatives. This is a configurable policy.
 
 ### 2.4 Exchangeability and Decision Rule
 
@@ -161,7 +166,7 @@ Both the hierarchical RT model and the softmax assignment model are fit with the
 Uncertainty from the RT model is propagated into the assignment model. For species \$s\$ and compound \$c\$, let \$t\_{sc}^{(r)}\$ denote the draw-wise linear predictor of RT (including hierarchical effects and standardized covariates) and \$\sigma\_y^{(r)}\$ the observation noise on draw \$r\$. We use:
 
 ```math
-\hat{t}_c = \mathbb{E}[t_{sc}] \quad\text{and}\quad \hat{\sigma}_c^2 = \mathrm{Var}[t_{sc}] + \mathbb{E}[\sigma_y^2]
+\hat{t}_{sc} = \mathbb{E}[t_{sc}] \quad\text{and}\quad \hat{\sigma}_{sc}^2 = \mathrm{Var}[t_{sc}] + \mathbb{E}[\sigma_y^2]
 ```
 
 This yields **predictive** uncertainty, not merely posterior uncertainty of parameters.
@@ -172,6 +177,18 @@ After filtering candidates by mass and RT window, we compute softmax probabiliti
 
 1. **Probability threshold**: Accept the top compound if \(\max_k p(y_i=k) \ge \tau_p\) and \(k>0\); otherwise assign null.
 2. **Many-to-one allowed**: No global matching is enforced across peaks; multiple peaks may be assigned to the same compound.
+
+### 3.4 Diagnostics and Checks
+
+After fitting the RT model, posterior predictive checks (PPC) are run and summarized via RMSE, MAE, and 95% predictive coverage overall and per species. Basic MCMC diagnostics are also summarized and gated: no Hamiltonian divergences, \(\hat{R} \le 1.01\), and bulk ESS \(\ge 200\). Failures are surfaced prominently in logs and written to JSON artifacts.
+
+## 4. Calibration Metrics
+
+Beyond accuracy metrics, we monitor calibration of the assignment probabilities:
+
+- Top‑1 ECE (primary): Expected calibration error computed on the maximum class probability and its correctness.
+- Macro OVR‑ECE (secondary): One‑vs‑rest ECE computed per class (including null) and macro‑averaged across classes.
+- OVR Brier score (secondary): Mean squared error of one‑vs‑rest probabilities across valid classes.
 ## 4. Implementation Notes
 
 - **Ragged to padded**: Variable candidate counts handled via masking.
@@ -188,3 +205,30 @@ A_{\text{FP}}(i) = \mathbb{I}[q_i^{\max} \geq \tau] \cdot (1 - q_i^{\max})
 ```
 
 where $q_i^{\max} = \max_k p(y_i = k)$ is the top probability for peak $i$.
+
+## 6. Evaluation Metrics (Many-to-Many Default)
+
+We evaluate many-to-many assignments where each peak may be assigned zero, one, or multiple compounds above a probability threshold, optionally capped at top-$k$ per peak.
+
+- Notation: For peak $i$, true set $T_i$ and predicted set $P_i(\tau, k)$. Pair universe $U$ comprises valid (peak, compound) pairs; true pairs include $(i,c)$ for $c\in T_i$ even if $c$ is not in the model’s candidate set (with predicted probability treated as 0).
+
+- Pair-based (micro) metrics over $U$:
+  - $\mathrm{TP}=\sum 1[\hat y_{ic}=1\wedge y_{ic}=1]$, $\mathrm{FP}=\sum 1[\hat y_{ic}=1\wedge y_{ic}=0]$, $\mathrm{FN}=\sum 1[\hat y_{ic}=0\wedge y_{ic}=1]$.
+  - $\mathrm{Precision}_{\mathrm{micro}}=\mathrm{TP}/(\mathrm{TP}+\mathrm{FP})$; $\mathrm{Recall}_{\mathrm{micro}}=\mathrm{TP}/(\mathrm{TP}+\mathrm{FN})$; $\mathrm{F1}_{\mathrm{micro}}$ is the harmonic mean.
+  - Decoy-aware reporting includes the FP share from decoy compounds.
+
+- Peak-level set metrics (macro): $\mathrm{Precision}_i$, $\mathrm{Recall}_i$, $\mathrm{F1}_i$ from $P_i$ vs $T_i$, plus Jaccard $=|P_i\cap T_i|/|P_i\cup T_i|$, macro-averaged across peaks.
+
+- Null-detection: False Assignment Rate among true-null peaks (FAR$_\text{null}$) and True Null Rate $=1-\mathrm{FAR}_\text{null}$; overall Assignment Rate (AR).
+
+- Compound-level identification (decoy-aware): precision/recall/F1 over unique compounds predicted vs true; decoy compound rate reported.
+
+- Coverage per compound $c$: fraction of true peaks of $c$ that are predicted for $c$; averaged across true compounds.
+
+- Calibration:
+  - ECE$_{\mathrm{micro}}$: pairwise binning of probabilities $p_{ic}$ vs $y_{ic}$ over $U$.
+  - OVR-ECE$_\text{macro}$: one-vs-rest ECE per class, macro-averaged.
+  - Brier$_\text{ovr}$: mean squared error $(p_{ic}-y_{ic})^2$ over $U$.
+  - Cardinality MAE: mean absolute error of $||P_i||-||T_i||$ across peaks.
+
+Default operating point uses probability threshold $\tau=0.7$ and cap $k=2$ predictions per peak.

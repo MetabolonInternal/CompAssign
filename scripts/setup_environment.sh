@@ -297,7 +297,6 @@ main() {
         echo ""
         echo "Next steps:"
         echo "  • Run tests: ${BLUE}PYTHONPATH=. python scripts/train.py --model standard --n-samples 100${NC}"
-        echo "  • Run ablation: ${BLUE}./scripts/run_ablation.sh --quick${NC}"
         echo "  • Run verification: ${BLUE}./scripts/run_verification.sh${NC}"
     fi
 }

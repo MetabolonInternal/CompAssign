@@ -68,6 +68,8 @@ def parse_args():
                        help='RT window multiplier k*sigma (default: 2.0 for harder data)')
     parser.add_argument('--probability-threshold', type=float, default=0.7,
                        help='Probability threshold for assignment')
+    parser.add_argument('--max-predictions-per-peak', type=int, default=2,
+                       help='Cap the number of predicted compounds per peak (many-to-many default)')
     parser.add_argument('--test-thresholds', action='store_true',
                        help='Test multiple probability thresholds')
     
@@ -97,14 +99,14 @@ def test_threshold_impact(assignment_model, output_path):
             'precision': result.precision,
             'recall': result.recall,
             'f1': result.f1,
-            'n_assigned': len([v for v in result.assignments.values() if v is not None])
+            'n_assigned_peaks': len([v for v in result.assignments.values() if len(v) > 0])
         })
         
         print_flush(f"\nThreshold: {thresh:.2f}")
         print_flush(f"  Precision: {result.precision:.3f}")
         print_flush(f"  Recall:    {result.recall:.3f}")
         print_flush(f"  F1:        {result.f1:.3f}")
-        print_flush(f"  Assigned:  {results[-1]['n_assigned']}")
+        print_flush(f"  Assigned peaks:  {results[-1]['n_assigned_peaks']}")
     
     # Save threshold analysis
     pd.DataFrame(results).to_csv(output_path / 'threshold_analysis.csv', index=False)
@@ -348,22 +350,41 @@ def main():
     # Get predictions (pass compound_info to properly handle decoys)
     results = assignment_model.assign(
         prob_threshold=args.probability_threshold,
-        compound_info=compound_info
+        compound_info=compound_info,
+        max_predictions_per_peak=args.max_predictions_per_peak
     )
     
     # Save traces and results
     trace_assignment.to_netcdf(output_path / "models" / "assignment_trace.nc")
     
-    # Save peak assignments
+    # Save peak assignments (many-to-many): compound list and compound:prob list
     peak_id_array = assignment_model.train_pack['peak_ids']
-    assignment_df = pd.DataFrame([
-        {
-            'peak_id': int(pid),
-            'assigned_compound': results.assignments.get(int(pid)),
-            'probability': results.top_prob.get(int(pid), 0.0)
-        }
-        for pid in peak_id_array
-    ])
+    rows = []
+    candidates_map = assignment_model.train_pack.get('row_to_candidates_test', assignment_model.train_pack['row_to_candidates'])
+    mask_test = assignment_model.train_pack.get('mask_test', assignment_model.train_pack['mask'])
+    for pid in peak_id_array:
+        pid = int(pid)
+        assigned = results.assignments.get(pid, [])
+        row = assignment_model.train_pack['peak_to_row'][pid]
+        valid_idx = np.where(mask_test[row])[0]
+        probs_vec = results.per_peak_probs.get(pid, np.array([]))
+        comp_prob = {}
+        for j, k in enumerate(valid_idx):
+            if k == 0:
+                continue
+            c = candidates_map[row][k]
+            if c is None:
+                continue
+            comp_prob[int(c)] = float(probs_vec[j])
+        assigned_str = ";".join(str(int(c)) for c in assigned)
+        assigned_probs_str = ";".join(f"{int(c)}:{comp_prob.get(int(c), 0.0):.4f}" for c in assigned)
+        rows.append({
+            'peak_id': pid,
+            'assigned_compounds': assigned_str,
+            'assigned_with_probs': assigned_probs_str,
+            'top_prob': results.top_prob.get(pid, 0.0)
+        })
+    assignment_df = pd.DataFrame(rows)
     assignment_df.to_csv(output_path / "results" / "peak_assignments.csv", index=False)
     
     # Save compound information (including decoy status)
@@ -408,10 +429,15 @@ def main():
     
     # Save metrics
     metrics = {
-        # Peak-level metrics
+        # Pair-based micro metrics
         'precision': float(results.precision),
         'recall': float(results.recall),
         'f1': float(results.f1),
+        # Peak-level macro metrics
+        'f1_macro': float(getattr(results, 'f1_macro', 0.0)),
+        'jaccard_macro': float(getattr(results, 'jaccard_macro', 0.0)),
+        'far_null': float(getattr(results, 'far_null', 0.0)),
+        'assignment_rate': float(getattr(results, 'assignment_rate', 0.0)),
         # Compound-level metrics (PRIMARY)
         'compound_precision': float(results.compound_precision),
         'compound_recall': float(results.compound_recall),
@@ -423,19 +449,19 @@ def main():
         # Coverage
         'mean_coverage': float(results.mean_coverage),
         # Other metrics
-        'ece_top1': float(results.ece),
+        'ece_micro': float(results.ece),
         'ece_ovr': float(getattr(results, 'ece_ovr', 0.0)),
         'brier_ovr': float(getattr(results, 'brier_ovr', 0.0)),
-        'true_positives': int(results.confusion_matrix.get('TP', 0)),
-        'false_positives': int(results.confusion_matrix.get('FP', 0)),
-        'false_negatives': int(results.confusion_matrix.get('FN', 0)),
-        'n_assigned': len([v for v in results.assignments.values() if v is not None]),
-        'n_peaks': len(results.assignments),
+        'cardinality_mae': float(getattr(results, 'cardinality_mae', 0.0)),
+        'true_positives_pairs': int(results.confusion_matrix.get('TP', 0)),
+        'false_positives_pairs': int(results.confusion_matrix.get('FP', 0)),
+        'false_negatives_pairs': int(results.confusion_matrix.get('FN', 0)),
         'timestamp': datetime.now().isoformat(),
         'model': 'hierarchical_bayesian',
         'mass_tolerance': args.mass_tolerance,
         'rt_window_k': args.rt_window_k,
-        'probability_threshold': args.probability_threshold
+        'probability_threshold': args.probability_threshold,
+        'max_predictions_per_peak': args.max_predictions_per_peak
     }
     
     with open(output_path / "results" / "assignment_metrics.json", 'w') as f:
@@ -443,9 +469,10 @@ def main():
     
     # 5. Print results (concise version)
     print_flush("\n5. Results:")
+    print_flush(f"  Pair F1 (micro): {metrics['f1']:.3f}  (P={metrics['precision']:.3f}, R={metrics['recall']:.3f})")
+    print_flush(f"  Peak Jaccard (macro): {metrics['jaccard_macro']:.3f}; FAR(null): {metrics['far_null']:.3f}; AR: {metrics['assignment_rate']:.3f}")
     print_flush(f"  Compounds: {metrics['compounds_identified']}/{metrics['compounds_total']} identified (F1={metrics['compound_f1']:.3f})")
     print_flush(f"  Coverage: {metrics['mean_coverage']:.1%} of peaks per compound")
-    print_flush(f"  Peaks: {metrics['n_assigned']}/{metrics['n_peaks']} assigned (F1={metrics['f1']:.3f})")
     
     # Test threshold impact if requested
     if args.test_thresholds:
@@ -518,13 +545,14 @@ def main():
                 print_flush(f"    Mean confidence: {conf_stats['decoy_assignments']['mean_confidence']:.3f}")
                 print_flush(f"    Range: [{conf_stats['decoy_assignments']['min_confidence']:.3f}, {conf_stats['decoy_assignments']['max_confidence']:.3f}]")
     
-    print_flush(f"\nPeak-level performance:")
-    print_flush(f"  Peak Precision: {metrics['precision']:.3f} ({metrics['precision']*100:.1f}%)")
-    print_flush(f"  Peak Recall:    {metrics['recall']:.3f} ({metrics['recall']*100:.1f}%)")
-    print_flush(f"  Peak F1:        {metrics['f1']:.3f}")
-    print_flush(f"  ECE (Top-1):    {metrics['ece_top1']:.3f}")
+    print_flush(f"\nPair-level performance:")
+    print_flush(f"  Precision: {metrics['precision']:.3f} ({metrics['precision']*100:.1f}%)")
+    print_flush(f"  Recall:    {metrics['recall']:.3f} ({metrics['recall']*100:.1f}%)")
+    print_flush(f"  F1:        {metrics['f1']:.3f}")
+    print_flush(f"  ECE (micro): {metrics['ece_micro']:.3f}")
     print_flush(f"  ECE (OVR):      {metrics['ece_ovr']:.3f}")
     print_flush(f"  Brier (OVR):    {metrics['brier_ovr']:.3f}")
+    print_flush(f"  Card. MAE:      {metrics['cardinality_mae']:.3f}")
     
     print_flush(f"\nResults saved to: {output_path}/")
 
