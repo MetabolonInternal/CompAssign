@@ -33,10 +33,10 @@ Format per item: ID, Title, Severity, Status, Summary, Evidence, Proposed Next S
 4) ID: DAT-004
    - Title: RT covariates are random placeholders (docs mismatch)
    - Severity: High
-   - Status: Open
-   - Summary: The RT model uses randomly generated descriptors and internal-standard arrays, not data-derived features as described in the docs; this undermines interpretability and may distort RT z-scores used downstream.
-   - Evidence: `scripts/train.py` creates random `descriptors` and `internal_std` just before RT model construction. Docs specify standardized molecular descriptors and IS from training data.
-   - Proposed Next Step: Generate meaningful synthetic covariates with known relationships to RT (or remove them and align docs), and standardize using training stats per spec.
+   - Status: Fixed
+   - Summary: Synthetic data now generates causal covariates (10‑dim descriptors and IS per species) and RTs consistent with the hierarchical model; train.py consumes these covariates directly. Features are standardized using training-only statistics in the RT model.
+   - Evidence: `scripts/create_synthetic_data.py` now returns `(descriptors, internal_std)` and simulates RT via `μ0 + α_s + β_c + D_c·θ + γ·IS_s + ε` with sum‑to‑zero centering. `scripts/train.py` passes these into `HierarchicalRTModel` and `compute_rt_predictions`. `src/compassign/rt_hierarchical.py` standardizes descriptors/IS using only compounds/species present in `obs_df`.
+   - Proposed Next Step: Optionally enable RT PPC in training to report RMSE/MAE/95% coverage and monitor posterior recovery of θ and γ; otherwise no action needed.
 
 5) ID: PRI-005
    - Title: Presence priors not updated from labels in training
@@ -87,17 +87,16 @@ Format per item: ID, Title, Severity, Status, Summary, Evidence, Proposed Next S
     - Proposed Next Step: Renumber for clarity.
 
 ## Notes on Code–Docs Alignment
-- RT model: Non-centered hierarchies, sum-to-zero constraints, priors, and predictive variance match docs. Covariate generation in the script currently deviates from the documented data-driven approach (see DAT-004).
+- RT model: Non-centered hierarchies, sum-to-zero constraints, priors, and predictive variance match docs. Covariate generation and standardization now align with the documented approach (see DAT-004 status: Fixed).
 - Peak assignment: Minimal 4-feature set, explicit null, presence prior as log-additive offset, hierarchical logit noise, masking, and exchangeability are implemented and tested (see `tests/test_exchangeability.py`). Presence prior “online updates” are not exercised in batch training (see PRI-005).
 
 ## Suggested Order of Work
 1. EVA-001 (metrics fairness) — unblock trustworthy reporting.
 2. RTM-002 (PPC) — validate uncertainty used downstream.
 3. CFG-003 (target_accept) — restore CLI fidelity/reproducibility.
-4. DAT-004 (covariates) — align code/docs and scientific story.
+4. DAT-004 (covariates) — Fixed; verify via PPC as desired.
 5. MCMC-006 (gating) — enforce basic MCMC quality checks.
 6. PRI-005 (presence updates) — decide policy and implement/clarify.
 7. PRI-007 (naming) — reduce confusion for maintainers.
 8. CAL-008 (ECE scope) — document or extend as needed.
 9. UX-009/UX-010 — clean logs and numbering.
-

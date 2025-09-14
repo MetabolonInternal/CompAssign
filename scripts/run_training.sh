@@ -135,22 +135,7 @@ main() {
         echo -e "${GREEN}✅ Training completed in $(format_time $DURATION)${NC}"
         
     else
-        END_TIME=$(date +%s)
-        DURATION=$((END_TIME - START_TIME))
-        
-        echo ""
-        echo -e "${RED}============================================${NC}"
-        echo -e "${RED}❌ Training failed${NC}"
-        echo -e "${RED}============================================${NC}"
-        echo ""
-        echo "Duration before failure: $(format_time $DURATION)"
-        echo ""
-        echo "Troubleshooting:"
-        echo "  1. Check if conda environment is activated: conda activate compassign"
-        echo "  2. Verify all dependencies are installed: conda env update -f environment.yml"
-        echo "  3. Check error messages above for specific issues"
-        echo ""
-        echo "For quick testing, try: $0 --quick"
+        # Preserve Python's stderr/stdout and exit silently with failure code
         exit 1
     fi
 }

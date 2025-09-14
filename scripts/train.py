@@ -135,8 +135,8 @@ def main():
     
     # 1. Generate synthetic data
     print_flush("\n1. Generating synthetic data...")
-    # create_metabolomics_data returns: peak_df, compound_df, true_assignments, rt_uncertainties, hierarchical_params
-    peak_df, compound_df, true_assignments, rt_uncertainties, hierarchical_params = create_metabolomics_data(
+    # Now returns: peak_df, compound_df, true_assignments, rt_uncertainties, hierarchical_params, descriptors, internal_std
+    peak_df, compound_df, true_assignments, rt_uncertainties, hierarchical_params, descriptors, internal_std = create_metabolomics_data(
         n_compounds=args.n_compounds,
         n_species=args.n_species,
         n_peaks_per_compound=3,
@@ -179,12 +179,7 @@ def main():
     
     # 2. Train RT model
     print_flush("\n2. Training hierarchical RT model...")
-    
-    # Generate some dummy descriptors and internal standards for now
-    n_descriptors = 5
-    descriptors = np.random.randn(args.n_compounds, n_descriptors)
-    internal_std = np.random.rand(args.n_species)
-    
+
     rt_model = HierarchicalRTModel(
         n_clusters=hierarchical_params['n_clusters'],
         n_species=args.n_species,

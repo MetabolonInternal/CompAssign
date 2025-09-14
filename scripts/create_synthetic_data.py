@@ -2,6 +2,15 @@
 """
 Synthetic data creation for CompAssign training with hierarchical structure.
 Generates metabolomics data with isomers, near-isobars, and realistic noise.
+
+DAT-004 alignment: This generator now creates causal RT covariates and RTs that
+follow the hierarchical model used in training. Specifically, we generate:
+- Molecular descriptors (p=10) with class-wise centroids + per-compound jitter
+- Internal standard measurements per species correlated with species effects
+- RT observations: y_sc = mu0 + alpha_s + beta_c + D_c·theta + gamma*IS_s + eps
+
+This replaces the previous ad hoc "predicted_rt" pathway and ensures that the
+RT model can learn meaningful coefficients and predictive variance.
 """
 
 import numpy as np
@@ -24,7 +33,7 @@ def create_metabolomics_data(
     mass_error_std: float = 0.002,
     rt_uncertainty_range: Tuple[float, float] = (0.05, 0.5),
     decoy_fraction: float = 0.5  # Fraction of compounds that are decoys (never present)
-) -> Tuple[pd.DataFrame, pd.DataFrame, Dict, Dict, Dict]:
+) -> Tuple[pd.DataFrame, pd.DataFrame, Dict, Dict, Dict, np.ndarray, np.ndarray]:
     """
     Create synthetic metabolomics data with hierarchical structure.
     
@@ -56,9 +65,14 @@ def create_metabolomics_data(
     true_assignments : dict
         Mapping of peak_id to true compound_id (or None for noise)
     rt_uncertainties : dict
-        RT prediction uncertainties for each compound
+        Legacy field retained for compatibility; set to homoscedastic sigma_y
+        for all compounds in this generator.
     hierarchical_params : dict
         Hierarchical model parameters (clusters, classes)
+    descriptors : np.ndarray
+        Molecular descriptor matrix of shape (n_compounds, 10)
+    internal_std : np.ndarray
+        Internal-standard proxy per species of shape (n_species,)
     """
     np.random.seed(42)
     
@@ -84,6 +98,7 @@ def create_metabolomics_data(
         mass = cluster_centers[cluster] + np.random.uniform(-50, 50)
         base_masses.append(mass)
     base_masses = np.array(base_masses)
+    # Base RT scale reference (used only for reporting compatibility)
     base_rts = np.random.uniform(1, 15, n_compounds)
     
     # Create isomers (same mass, different RT)
@@ -113,31 +128,68 @@ def create_metabolomics_data(
         # Also similar RT! (near-isobars often have similar chemistry)
         base_rts[i] = base_rts[ref_idx] + np.random.normal(0, 0.5)
     
-    # Build compound dataframe
+    # Build compound dataframe (predicted_rt kept for compatibility; will be
+    # set later to a species-agnostic baseline RT mean)
     compound_df = pd.DataFrame({
         'compound_id': range(n_compounds),
         'true_mass': base_masses,
-        'predicted_rt': base_rts,
+        'predicted_rt': base_rts,  # temporary; overwritten below
         'type': ['isomer' if i < n_isomers else 
                 'near_isobar' if i < n_isomers + n_near_isobars else 
                 'normal' for i in range(n_compounds)],
         'class': compound_class
     })
+
+    # --- New causal covariates and hierarchical RT generative model ---
+    p = 10  # descriptor dimensionality (per user instruction)
+
+    # Class-wise descriptor centroids + per-compound jitter
+    class_centroids = np.random.normal(0.0, 1.0, size=(n_classes, p))
+    descriptors = np.zeros((n_compounds, p), dtype=float)
+    for j in range(n_compounds):
+        c = compound_class[j]
+        descriptors[j] = class_centroids[c] + np.random.normal(0.0, 0.5, size=p)
+
+    # Hierarchical effects (with sum-to-zero centering)
+    # Variance scales chosen to yield realistic minutes-scale variability
+    sigma_cluster = 1.0
+    sigma_species = 0.7
+    sigma_class = 1.0
+    sigma_compound = 0.7
+    sigma_y = 0.4  # observation noise (homoscedastic)
+
+    # Cluster, class base effects
+    cluster_raw = np.random.normal(0.0, 1.0, size=n_clusters) * sigma_cluster
+    cluster_eff = cluster_raw - cluster_raw.mean()
+
+    class_raw = np.random.normal(0.0, 1.0, size=n_classes) * sigma_class
+    class_eff = class_raw - class_raw.mean()
+
+    # Species effects conditional on clusters
+    species_raw = np.random.normal(0.0, 1.0, size=n_species) * sigma_species
+    species_base = cluster_eff[species_cluster] + species_raw
+    alpha_species = species_base - species_base.mean()
+
+    # Compound effects conditional on classes
+    compound_raw = np.random.normal(0.0, 1.0, size=n_compounds) * sigma_compound
+    compound_base = class_eff[compound_class] + compound_raw
+    beta_compound = compound_base - compound_base.mean()
+
+    # Coefficients for descriptors and internal standard
+    theta = np.random.normal(0.0, 0.3, size=p)  # moderate signal per feature
+    gamma = np.random.normal(0.0, 0.7)          # moderate effect on IS
+
+    # Internal-standard proxy per species, correlated with alpha_species
+    internal_std = alpha_species + np.random.normal(0.0, 0.5, size=n_species)
+
+    # Global intercept near center of chromatogram
+    mu0 = np.random.uniform(5.0, 11.0)
+
+    # Species-agnostic baseline RT per compound (for compatibility column)
+    baseline_rt = mu0 + beta_compound + descriptors @ theta
+    compound_df['predicted_rt'] = baseline_rt
     
-    # Generate RT uncertainties AND add systematic RT prediction errors
-    rt_uncertainties = {}
-    rt_prediction_errors = {}
-    for i in range(n_compounds):
-        # Higher base uncertainty
-        rt_uncertainties[i] = np.random.uniform(*rt_uncertainty_range)
-        # Add systematic prediction bias (RT model is imperfect!)
-        rt_prediction_errors[i] = np.random.normal(0, 1.0)  # ±1 minute typical error
-    
-    # Apply RT prediction errors to the "predicted" RTs
-    for i in range(n_compounds):
-        compound_df.loc[i, 'predicted_rt'] += rt_prediction_errors[i]
-    
-    # Generate peaks
+    # Generate peaks using the hierarchical RT generative story
     peaks = []
     peak_id = 0
     true_assignments = {}
@@ -162,13 +214,22 @@ def create_metabolomics_data(
         
         for compound_id in present_compounds:
             compound = compound_df.iloc[compound_id]
-            
             # Generate multiple peaks per compound (isotopes, fragments)
             n_peaks = np.random.poisson(n_peaks_per_compound)
             for _ in range(n_peaks):
-                # Add measurement error
+                # Mass measurement error
                 measured_mass = compound['true_mass'] + np.random.normal(0, mass_error_std)
-                measured_rt = compound['predicted_rt'] + np.random.normal(0, rt_uncertainties[compound_id])
+
+                # RT mean per species–compound from hierarchical story
+                mu_sc = (
+                    mu0
+                    + alpha_species[species]
+                    + beta_compound[compound_id]
+                    + float(descriptors[compound_id] @ theta)
+                    + gamma * internal_std[species]
+                )
+
+                measured_rt = np.random.normal(mu_sc, sigma_y)
                 
                 peaks.append({
                     'peak_id': peak_id,
@@ -204,14 +265,18 @@ def create_metabolomics_data(
         'species_cluster': species_cluster,
         'compound_class': compound_class
     }
-    
-    return peak_df, compound_df, true_assignments, rt_uncertainties, hierarchical_params
+
+    # Legacy uncertainties dict retained (homoscedastic sigma_y)
+    rt_uncertainties = {i: sigma_y for i in range(n_compounds)}
+
+    return peak_df, compound_df, true_assignments, rt_uncertainties, hierarchical_params, descriptors, internal_std
 
 
 if __name__ == "__main__":
     # Test the function
-    peaks, compounds, assignments, rt_uncert, hier_params = create_metabolomics_data()
+    peaks, compounds, assignments, rt_uncert, hier_params, desc, is_vec = create_metabolomics_data()
     print(f"Generated {len(peaks)} peaks with {len(compounds)} compounds")
     print(f"True assignments: {sum(1 for v in assignments.values() if v is not None)}")
     print(f"Noise peaks: {sum(1 for v in assignments.values() if v is None)}")
     print(f"Hierarchical params: {hier_params['n_clusters']} clusters, {hier_params['n_classes']} classes")
+    print(f"Descriptors shape: {desc.shape}, Internal std shape: {is_vec.shape}")

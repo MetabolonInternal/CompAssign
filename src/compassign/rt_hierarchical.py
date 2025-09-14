@@ -86,14 +86,18 @@ class HierarchicalRTModel:
         species_idx = obs_df['species'].values.astype(int)
         compound_idx = obs_df['compound'].values.astype(int)
         
-        # Standardize covariates to improve sampling and reduce divergences
-        self._desc_mean = self.descriptors.mean(axis=0)
-        self._desc_std = self.descriptors.std(axis=0) + 1e-8
-        desc_std = (self.descriptors - self._desc_mean) / self._desc_std
-        
-        self._is_mean = self.internal_std.mean()
-        self._is_std = self.internal_std.std() + 1e-8
-        is_std = (self.internal_std - self._is_mean) / self._is_std
+        # Standardize covariates using TRAINING statistics only
+        # Compute means/stds from unique compounds/species present in obs_df
+        unique_compounds = np.unique(compound_idx)
+        unique_species = np.unique(species_idx)
+
+        self._desc_mean = self.descriptors[unique_compounds].mean(axis=0)
+        self._desc_std = self.descriptors[unique_compounds].std(axis=0) + 1e-8
+        desc_std_all = (self.descriptors - self._desc_mean) / self._desc_std
+
+        self._is_mean = self.internal_std[unique_species].mean()
+        self._is_std = self.internal_std[unique_species].std() + 1e-8
+        is_std_all = (self.internal_std - self._is_mean) / self._is_std
         
         with pm.Model() as model:
             # Hyperpriors for random effect standard deviations
@@ -160,16 +164,16 @@ class HierarchicalRTModel:
             # Global intercept and regression coefficients
             # Center intercept at empirical mean of RT since response is not standardized
             mu0 = pm.Normal('mu0', float(obs_df['rt'].mean()), 5.0)  # Prior centered at empirical mean
-            beta = pm.Normal('beta', 0.0, 1.0, shape=desc_std.shape[1])  # Tighter prior for standardized features
+            beta = pm.Normal('beta', 0.0, 1.0, shape=desc_std_all.shape[1])  # Tighter prior for standardized features
             gamma = pm.Normal('gamma', 0.0, 1.0)  # Standardized coefficient
             
             # Expected retention time for each observation
             # Use standardized covariates
-            rt_mean = (mu0 
-                      + species_eff[species_idx] 
-                      + compound_eff[compound_idx] 
-                      + pm.math.dot(desc_std[compound_idx], beta) 
-                      + gamma * is_std[species_idx])
+            rt_mean = (mu0
+                      + species_eff[species_idx]
+                      + compound_eff[compound_idx]
+                      + pm.math.dot(desc_std_all[compound_idx], beta)
+                      + gamma * is_std_all[species_idx])
             
             # Likelihood
             y_obs = pm.Normal('y_obs', mu=rt_mean, sigma=sigma_y, observed=obs_df['rt'].values)
