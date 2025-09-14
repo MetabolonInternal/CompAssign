@@ -195,7 +195,7 @@ def main():
     rt_model.build_model(rt_df)
     
     print_flush(f"Sampling with {args.n_chains or 4} chains, {args.n_samples} samples each...")
-    used_target_accept = max(args.target_accept, 0.99)
+    used_target_accept = args.target_accept  # Honor CLI parameter as-is
     print_flush(f"Target accept: {used_target_accept}, Max treedepth: 15")
     
     sample_kwargs = {
@@ -209,16 +209,95 @@ def main():
     sample_kwargs['n_chains'] = args.n_chains or 4
     
     trace_rt = rt_model.sample(**sample_kwargs)
-    
+
     # Save RT trace
     trace_rt.to_netcdf(output_path / "models" / "rt_trace.nc")
-    
-    # 3. Create RT model diagnostic plots
-    print_flush("\n3. Creating RT model diagnostic plots...")
-    # For now, skip PPC and just pass empty dict
+
+    # 2b. MCMC convergence/divergence diagnostics (gating)
+    print_flush("\n2b. Checking RT MCMC diagnostics...")
+    try:
+        diag = {}
+        summary = az.summary(trace_rt)
+        rhat = summary['r_hat'].dropna()
+        ess = summary['ess_bulk'].dropna()
+        rhat_threshold = 1.01
+        ess_threshold = 200
+        rhat_viol = rhat[rhat > rhat_threshold].to_dict()
+        ess_viol = ess[ess < ess_threshold].to_dict()
+        divergences = int(trace_rt.sample_stats['diverging'].values.sum()) if 'diverging' in trace_rt.sample_stats else 0
+
+        diag['rhat_max'] = float(rhat.max()) if len(rhat) else None
+        diag['ess_min'] = float(ess.min()) if len(ess) else None
+        diag['rhat_threshold'] = rhat_threshold
+        diag['ess_threshold'] = ess_threshold
+        diag['rhat_violations'] = {k: float(v) for k, v in list(rhat_viol.items())[:20]}
+        diag['ess_violations'] = {k: float(v) for k, v in list(ess_viol.items())[:20]}
+        diag['divergences'] = divergences
+
+        gating_failed = divergences > 0 or len(rhat_viol) > 0 or len(ess_viol) > 0
+        diag['gating_failed'] = gating_failed
+
+        with open(output_path / "results" / "rt_mcmc_diagnostics.json", 'w') as f:
+            json.dump(diag, f, indent=2)
+
+        if gating_failed:
+            print_flush("  WARNING: MCMC diagnostics outside thresholds:")
+            print_flush(f"    divergences: {divergences}")
+            if rhat_viol:
+                print_flush(f"    r_hat violations (>{rhat_threshold}): {len(rhat_viol)} vars; max={diag['rhat_max']:.3f}")
+            if ess_viol:
+                print_flush(f"    ESS violations (<{ess_threshold}): {len(ess_viol)} vars; min={diag['ess_min']:.1f}")
+        else:
+            print_flush("  MCMC diagnostics look good (no divergences; r_hat/ESS within thresholds)")
+    except Exception as e:
+        print_flush(f"  Warning: failed to compute MCMC diagnostics: {e}")
+
+    # 3. Posterior predictive checks + diagnostic plots
+    print_flush("\n3. RT posterior predictive checks + diagnostics...")
+    ppc_results = rt_model.posterior_predictive_check(rt_df, random_seed=args.seed)
+
+    # Compute per-species PPC metrics
+    try:
+        y_true = ppc_results['y_true']
+        pred_mean = ppc_results['pred_mean']
+        pred_lo = ppc_results['pred_lower_95']
+        pred_hi = ppc_results['pred_upper_95']
+        species_arr = rt_df['species'].values
+
+        by_species = {}
+        for s in np.unique(species_arr):
+            m = species_arr == s
+            if m.sum() == 0:
+                continue
+            rmse_s = float(np.sqrt(np.mean((pred_mean[m] - y_true[m]) ** 2)))
+            mae_s = float(np.mean(np.abs(pred_mean[m] - y_true[m])))
+            cov_s = float(np.mean((y_true[m] >= pred_lo[m]) & (y_true[m] <= pred_hi[m])))
+            by_species[int(s)] = {"rmse": rmse_s, "mae": mae_s, "coverage_95": cov_s}
+
+        ppc_summary = {
+            'overall': {
+                'rmse': float(ppc_results['rmse']),
+                'mae': float(ppc_results['mae']),
+                'coverage_95': float(ppc_results['coverage_95'])
+            },
+            'by_species': by_species,
+            'timestamp': datetime.now().isoformat()
+        }
+
+        (output_path / "results").mkdir(exist_ok=True)
+        with open(output_path / "results" / "rt_ppc_summary.json", 'w') as f:
+            json.dump(ppc_summary, f, indent=2)
+
+        print_flush(f"  RT RMSE: {ppc_summary['overall']['rmse']:.3f}, "
+                    f"MAE: {ppc_summary['overall']['mae']:.3f}, "
+                    f"95% coverage: {ppc_summary['overall']['coverage_95']*100:.1f}%")
+    except Exception as e:
+        print_flush(f"  Warning: failed to compute per-species PPC metrics: {e}")
+
+    # Create diagnostic plots with PPC
     create_all_diagnostic_plots(
         trace_rt,
-        {},  # No PPC results for now
+        ppc_results,
         output_path
     )
     
@@ -250,6 +329,12 @@ def main():
         compound_info=compound_info,  # Pass compound_info to skip decoys during training
         initial_labeled_fraction=0.8  # 80% labeled for training
     )
+
+    # Save presence prior snapshot
+    try:
+        assignment_model.presence.save(str(output_path / "models" / "presence_prior.npz"))
+    except Exception as e:
+        print_flush(f"Warning: could not save presence prior: {e}")
     
     # Build and sample
     assignment_model.build_model()
@@ -338,7 +423,9 @@ def main():
         # Coverage
         'mean_coverage': float(results.mean_coverage),
         # Other metrics
-        'ece': float(results.ece),
+        'ece_top1': float(results.ece),
+        'ece_ovr': float(getattr(results, 'ece_ovr', 0.0)),
+        'brier_ovr': float(getattr(results, 'brier_ovr', 0.0)),
         'true_positives': int(results.confusion_matrix.get('TP', 0)),
         'false_positives': int(results.confusion_matrix.get('FP', 0)),
         'false_negatives': int(results.confusion_matrix.get('FN', 0)),
@@ -374,7 +461,7 @@ def main():
     # )
     
     # Print final summary
-    print_flush("\n5. Training complete")
+    print_flush("\n6. Training complete")
     
     # Calculate dataset statistics
     N, K = assignment_model.train_pack['mask'].shape
@@ -435,7 +522,9 @@ def main():
     print_flush(f"  Peak Precision: {metrics['precision']:.3f} ({metrics['precision']*100:.1f}%)")
     print_flush(f"  Peak Recall:    {metrics['recall']:.3f} ({metrics['recall']*100:.1f}%)")
     print_flush(f"  Peak F1:        {metrics['f1']:.3f}")
-    print_flush(f"  ECE:            {metrics['ece']:.3f}")
+    print_flush(f"  ECE (Top-1):    {metrics['ece_top1']:.3f}")
+    print_flush(f"  ECE (OVR):      {metrics['ece_ovr']:.3f}")
+    print_flush(f"  Brier (OVR):    {metrics['brier_ovr']:.3f}")
     
     print_flush(f"\nResults saved to: {output_path}/")
 

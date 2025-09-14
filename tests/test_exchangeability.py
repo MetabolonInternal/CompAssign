@@ -23,7 +23,7 @@ def _compute_probs_from_pack(train_pack, presence: PresencePrior, theta0, theta_
     presence_matrix = np.zeros((N, K_max), dtype=float)
     for i in range(N):
         s = int(peak_species[i])
-        log_pi_compounds = presence.log_prior_odds(s)
+        log_pi_compounds = presence.log_prior_prob(s)
         presence_matrix[i, 0] = log_pi_null
         candidates = row_to_candidates[i]
         for k in range(1, K_max):

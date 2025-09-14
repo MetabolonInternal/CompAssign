@@ -188,7 +188,8 @@ class HierarchicalRTModel:
                target_accept: float = 0.99,
                max_treedepth: int = 15,
                random_seed: int = 42,
-               init: str = 'adapt_diag') -> az.InferenceData:
+               init: str = 'adapt_diag',
+               verbose: bool = False) -> az.InferenceData:
         """
         Sample from the posterior using NUTS.
         
@@ -217,9 +218,10 @@ class HierarchicalRTModel:
         if self.model is None:
             raise ValueError("Model not built. Call build_model() first.")
         
-        chains_str = f"{n_chains} chains" if n_chains is not None else "default chains"
-        print(f"Sampling with {chains_str}, {n_samples} samples each...")
-        print(f"Target accept: {target_accept}, Max treedepth: {max_treedepth}")
+        if verbose:
+            chains_str = f"{n_chains} chains" if n_chains is not None else "default chains"
+            print(f"Sampling with {chains_str}, {n_samples} samples each...")
+            print(f"Target accept: {target_accept}, Max treedepth: {max_treedepth}")
         
         # Build sampling kwargs
         sample_kwargs = {

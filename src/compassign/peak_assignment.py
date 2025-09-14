@@ -49,6 +49,8 @@ class AssignmentResults:
     
     # Calibration
     ece: float  # Expected Calibration Error
+    ece_ovr: float  # Macro OVR-ECE across classes
+    brier_ovr: float  # OVR Brier score across classes
     
     # Groupings for analysis
     peaks_by_compound: Dict[int, List[int]]  # compound_id -> list of peak_ids assigned to it
@@ -403,6 +405,28 @@ class PeakAssignment:
             if len(valid_idx) > 0:
                 seed_idx = rng.choice(valid_idx, size=min(n_seed, len(valid_idx)), replace=False)
                 labels[seed_idx] = true_labels[seed_idx]
+
+        # Batch-positive presence prior updates (one-per-(species, compound))
+        # - Increment alpha for each labeled positive compound once per species
+        # - Increment null prior for labeled nulls
+        updated_pairs = set()
+        for i in range(N):
+            lab = labels[i]
+            if lab < 0:
+                continue  # unlabeled in batch
+            s = peak_species[i]
+            if lab == 0:
+                # labeled null
+                self.presence.update_null()
+            else:
+                # labeled positive; map to compound id from training candidates
+                if lab < len(row_to_candidates_train[i]):
+                    c = row_to_candidates_train[i][lab]
+                    if c is not None:
+                        key = (int(s), int(c))
+                        if key not in updated_pairs:
+                            self.presence.update_positive(int(s), int(c), weight=1.0)
+                            updated_pairs.add(key)
         
         # Store training pack with BOTH train and test tensors
         self.train_pack = {
@@ -463,7 +487,7 @@ class PeakAssignment:
             for i in range(N):
                 s = peak_species[i]
                 candidates = row_to_candidates[i]
-                log_pi_compounds = self.presence.log_prior_odds(s)
+                log_pi_compounds = self.presence.log_prior_prob(s)
                 
                 presence_matrix[i, 0] = log_pi_null  # Null prior
                 for k in range(1, self.K_max):
@@ -573,7 +597,7 @@ class PeakAssignment:
             for i in range(N):
                 s = peak_species[i]
                 candidates = candidates_map[i]
-                log_pi_compounds = self.presence.log_prior_odds(s)
+                log_pi_compounds = self.presence.log_prior_prob(s)
                 
                 presence_matrix_test[i, 0] = log_pi_null  # Null prior
                 for k in range(1, self.K_max):
@@ -705,15 +729,25 @@ class PeakAssignment:
         # Build mappings for many-to-one evaluation
         true_peaks_by_compound = defaultdict(list)
         pred_peaks_by_compound = defaultdict(list)
-        
-        # FIRST PASS: Build compound mappings from ALL peaks (for compound-level metrics)
+
+        # Define evaluation set (IDs) for consistency across metrics
+        eval_set = set(map(int, eval_peak_ids)) if eval_peak_ids is not None else set(map(int, peak_ids))
+
+        # FIRST PASS: Build compound mappings from TEST-ONLY peaks in eval set
+        # This mirrors peak-level filtering and avoids optimistic compound metrics.
         for i, peak_id in enumerate(peak_ids):
+            # Restrict to held-out/test peaks and any explicit eval subset
+            if int(peak_id) not in eval_set:
+                continue
+            if train_labels[i] >= 0:
+                continue  # skip training-labeled peaks
+
             pred = assignments.get(peak_id)
             true_comp = true_compounds[i] if true_compounds is not None else None
             if pd.notna(true_comp) if isinstance(true_comp, (np.floating, float)) else (true_comp is not None):
                 true_comp = int(true_comp)
                 true_peaks_by_compound[true_comp].append(peak_id)
-            
+
             # Track predicted compounds
             if pred is not None:
                 pred_peaks_by_compound[pred].append(peak_id)
@@ -723,7 +757,7 @@ class PeakAssignment:
         all_probs = []
         all_correct = []
         
-        eval_set = set(map(int, eval_peak_ids)) if eval_peak_ids is not None else set(map(int, peak_ids))
+        # Reuse the same eval_set defined above for peak-level metrics
         
         for i, (peak_id, label) in enumerate(zip(peak_ids, true_labels)):
             if int(peak_id) not in eval_set:
@@ -811,8 +845,64 @@ class PeakAssignment:
         
         mean_coverage = np.mean(list(coverage_per_compound.values())) if coverage_per_compound else 0
         
-        # Calculate calibration
+        # Calculate calibration (Top-1 ECE)
         ece = self._calculate_ece(np.array(all_probs), np.array(all_correct))
+
+        # Multiclass calibration and scoring (OVR-ECE and Brier)
+        # Build per-class probability/label pairs over the eval test set
+        ovr_by_class_probs = {}
+        ovr_by_class_labels = {}
+        brier_terms = []
+
+        mask_test = self.train_pack.get('mask_test', self.train_pack['mask'])
+        row_to_candidates_eval = self.train_pack.get('row_to_candidates_test', self.train_pack['row_to_candidates'])
+
+        for i, peak_id in enumerate(peak_ids):
+            if int(peak_id) not in eval_set:
+                continue
+            if train_labels[i] >= 0:
+                continue  # test-only
+
+            probs = peak_probs[peak_id]
+            true_tc = true_compounds[i] if true_compounds is not None else None
+            true_comp = None if (true_tc is None or (isinstance(true_tc, float) and np.isnan(true_tc))) else int(true_tc)
+
+            # Align probs with class indices via mask
+            valid_idx = np.where(mask_test[i])[0]
+            candidates = row_to_candidates_eval[i]
+
+            # Accumulate OVR pairs and Brier terms across valid classes
+            for j, k in enumerate(valid_idx):
+                p = float(probs[j])
+                if k == 0:
+                    class_id = -1  # null class
+                    y = 1 if true_comp is None else 0
+                else:
+                    c = candidates[k]
+                    class_id = int(c) if c is not None else None
+                    if class_id is None:
+                        continue
+                    y = 1 if (true_comp is not None and class_id == true_comp) else 0
+
+                # OVR aggregation per class
+                if class_id is not None:
+                    ovr_by_class_probs.setdefault(class_id, []).append(p)
+                    ovr_by_class_labels.setdefault(class_id, []).append(y)
+
+                # Brier OVR term
+                brier_terms.append((p - y) ** 2)
+
+        # Compute macro-averaged OVR-ECE across classes (including null as -1)
+        ece_ovr_vals = []
+        for cls, probs_list in ovr_by_class_probs.items():
+            labels_list = ovr_by_class_labels.get(cls, [])
+            if len(probs_list) > 0 and len(labels_list) > 0:
+                ece_cls = self._calculate_ece(np.array(probs_list), np.array(labels_list))
+                ece_ovr_vals.append(ece_cls)
+        ece_ovr = float(np.mean(ece_ovr_vals)) if ece_ovr_vals else 0.0
+
+        # Overall OVR-style Brier score
+        brier_ovr = float(np.mean(brier_terms)) if brier_terms else 0.0
         
         # Don't print here - let train.py handle all output
         
@@ -841,6 +931,8 @@ class PeakAssignment:
             mean_coverage=mean_coverage,
             # Calibration
             ece=ece,
+            ece_ovr=ece_ovr,
+            brier_ovr=brier_ovr,
             # Groupings
             peaks_by_compound=dict(pred_peaks_by_compound),
             true_peaks_by_compound=dict(true_peaks_by_compound)

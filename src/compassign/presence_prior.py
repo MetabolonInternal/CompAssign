@@ -83,28 +83,19 @@ class PresencePrior:
             beta_null=null_prior[1]
         )
     
-    def log_prior_odds(self, species_idx: int) -> np.ndarray:
+    def log_prior_prob(self, species_idx: int) -> np.ndarray:
         """
-        Return log(π_sc) for all compounds c in species s.
-        
-        Parameters
-        ----------
-        species_idx : int
-            Species index
-            
-        Returns
-        -------
-        np.ndarray
-            Shape (n_compounds,). Log probabilities for each compound.
+        Return log probability log(π_sc) for all compounds c in species s.
+
+        Note: This is intentionally log-probability, not log-odds.
         """
         if species_idx < 0 or species_idx >= self.alpha.shape[0]:
             raise ValueError(f"Invalid species index: {species_idx}")
-            
-        # Posterior mean of Beta distribution
+
         pi = self.alpha[species_idx] / (self.alpha[species_idx] + self.beta[species_idx])
-        
-        # Return log probabilities with numerical stability
         return np.log(np.clip(pi, 1e-12, 1.0))
+
+    # Note: `log_prior_odds` removed; use `log_prior_prob` instead.
     
     def log_prior_null(self) -> float:
         """
