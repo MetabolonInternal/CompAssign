@@ -1,137 +1,103 @@
-# NEXT SESSION HANDOVER — Metabolomics Peak Assignment System
+# Next Session Handover — Model Rigor Issues
 
-## Current Status
-✅ **Many-to-one assignment**: Multiple peaks can map to the same compound (realistic)
-✅ **Challenging synthetic data**: Includes isomers, near-isobars, RT errors
-✅ **Decoy compounds**: 50% of library never appears in samples
-✅ **Hierarchical Bayesian model**: Uses presence priors to handle compound likelihood
-✅ **Dual candidate structures**: Training excludes decoys, test includes all compounds
+This document tracks open issues found during review of the core pipeline (RT model, peak assignment model, data/feature flow, and evaluation), cross‑checked against `docs/bayesian_models.md` and recent training output. No fixes applied yet.
 
-## Key Understanding: Decoy Behavior
+Format per item: ID, Title, Severity, Status, Summary, Evidence, Proposed Next Step.
 
-The model achieves 0% false positives from decoys. **This is CORRECT behavior:**
-- The PresencePrior system learns compound presence patterns from training data
-- Decoys never appear → Beta(1,1) priors → low presence probability
-- Real compounds appear → Beta(1+count,1) priors → higher presence probability
-- The model correctly avoids assigning peaks to decoys
+## Ranked Issues
 
-## Current Performance Metrics
-```
-Compound-level:
-  Precision: 100% (correctly identifies real compounds)
-  Recall: 100% (finds all present compounds)
-  Mean Coverage: 67-75% (peaks per compound)
+1) ID: EVA-001
+   - Title: Compound-level metrics include training peaks (optimistic)
+   - Severity: High
+   - Status: Open
+   - Summary: Compound Precision/Recall/F1 and coverage are computed using all peaks, including training-labeled peaks, whereas peak-level metrics correctly exclude training peaks. This likely inflates compound-level metrics (e.g., F1=1.000 in the sample run).
+   - Evidence: In `PeakAssignment.assign`, compound mappings (`true_peaks_by_compound`, `pred_peaks_by_compound`) are built over all peaks; only peak-level metrics filter to test by skipping indices with training labels. `scripts/train.py` prints compound metrics without a test-only restriction.
+   - Proposed Next Step: Restrict compound-level metrics and coverage to held-out/test peaks (mirror peak-level filtering) and re-report results.
 
-Peak-level:
-  Precision: 75-85% (some wrong assignments)
-  Recall: 67-75% (conservative)
-  F1: 0.75
+2) ID: RTM-002
+   - Title: RT posterior predictive checks (PPC) are skipped
+   - Severity: High
+   - Status: Open
+   - Summary: The training script does not run PPC or residual diagnostics for the RT model, leaving predictive calibration of the RT component unverified.
+   - Evidence: `scripts/train.py` passes `{}` to `create_all_diagnostic_plots`; console prints “Skipping PPC plots (no PPC results available)”. `rt_hierarchical.HierarchicalRTModel.posterior_predictive_check` exists but is unused.
+   - Proposed Next Step: Run PPC after sampling, compute RMSE/MAE/95% coverage, save residual plots, and surface failures/poor coverage prominently.
 
-Decoy Statistics:
-  Library: 15 real, 15 decoys
-  Decoys assigned: 0/15 (0% - expected due to presence priors)
-```
+3) ID: CFG-003
+   - Title: RT `target_accept` CLI overridden to ≥0.99
+   - Severity: High
+   - Status: Open
+   - Summary: The RT sampling uses `max(args.target_accept, 0.99)`, ignoring lower user-specified values and diverging from the command-line shown in logs.
+   - Evidence: `scripts/train.py` sets `used_target_accept = max(args.target_accept, 0.99)` before calling `rt_model.sample`.
+   - Proposed Next Step: Honor CLI parameter as-is, or clearly document and log the enforced minimum; ensure parity with the assignment model’s behavior.
 
-## System Architecture
+4) ID: DAT-004
+   - Title: RT covariates are random placeholders (docs mismatch)
+   - Severity: High
+   - Status: Open
+   - Summary: The RT model uses randomly generated descriptors and internal-standard arrays, not data-derived features as described in the docs; this undermines interpretability and may distort RT z-scores used downstream.
+   - Evidence: `scripts/train.py` creates random `descriptors` and `internal_std` just before RT model construction. Docs specify standardized molecular descriptors and IS from training data.
+   - Proposed Next Step: Generate meaningful synthetic covariates with known relationships to RT (or remove them and align docs), and standardize using training stats per spec.
 
-### Key Components
-1. **Hierarchical RT Model** (`rt_hierarchical.py`): Predicts retention times with uncertainty
-2. **Peak Assignment Model** (`peak_assignment.py`): Hierarchical Bayesian assignment with presence priors
-3. **Presence Prior** (`presence_prior.py`): Beta-Bernoulli priors for compound likelihood
-4. **Synthetic Data Generator** (`create_synthetic_data.py`): Creates realistic test scenarios
+5) ID: PRI-005
+   - Title: Presence priors not updated from labels in training
+   - Severity: Medium
+   - Status: Open
+   - Summary: Presence priors are initialized but not updated using available training labels, whereas docs describe online updates from annotations.
+   - Evidence: `PresencePrior` supports updates; `PeakAssignment.generate_training_data/build_model` do not call updates; `train.py` does not update priors during batch training.
+   - Proposed Next Step: Decide policy (batch training updates vs. AL-only updates). If batch updates are desired, increment α for observed positives and β for negatives per species-compound during training.
 
-### Important Implementation Details
-```python
-# Dual candidate structure in peak_assignment.py
-- Training candidates: Exclude decoys (prevents memorization)
-- Test candidates: Include ALL compounds
-- Model dimensions: max(train_candidates, test_candidates)
-- Test inference: Uses test candidates with presence priors
-```
+6) ID: MCMC-006
+   - Title: No convergence/divergence gating for RT model
+   - Severity: Medium
+   - Status: Open
+   - Summary: Sampling completes without programmatic checks on divergences, R-hat, or ESS; issues are not surfaced as failures/warnings.
+   - Evidence: `rt_hierarchical.sample` has a TODO noting disabled checks; diagnostic plots are generated but not enforced.
+   - Proposed Next Step: Summarize `az.summary` post-sampling, gate on thresholds (e.g., r_hat ≤ 1.01, no divergences, minimum ESS), and halt or warn if violated.
 
-## Configuration
-```python
-mass_tolerance: 0.01 Da        # Mass window for candidates
-rt_window_k: 2.0σ              # RT window (in standard deviations)
-probability_threshold: 0.3-0.5 # Assignment confidence threshold
-decoy_fraction: 0.5            # 50% of compounds are decoys
-isomer_fraction: 0.4           # 40% compounds have isomers
-near_isobar_fraction: 0.3      # 30% have near-isobars
-presence_prob: 0.25            # Only 25% compounds per sample
-```
+7) ID: PRI-007
+   - Title: Misleading method name `log_prior_odds` (returns log-probability)
+   - Severity: Medium
+   - Status: Open
+   - Summary: Function name suggests log-odds but returns `log(pi)`. The math in code and docs uses `log π` as an additive offset, so behavior is correct; name risks confusion.
+   - Evidence: `PresencePrior.log_prior_odds` returns `np.log(pi)`; docs add `log π` to logits.
+   - Proposed Next Step: Rename (e.g., `log_prior_prob`) or add explicit docstring clarification.
 
-## Running the System
-```bash
-# Quick test (reduced sampling)
-./scripts/run_training.sh --quick
+8) ID: CAL-008
+   - Title: ECE computed on top-class confidence only
+   - Severity: Medium
+   - Status: Open
+   - Summary: ECE uses only the maximum probability per peak. This reflects confidence calibration but not full multiclass calibration.
+   - Evidence: `PeakAssignment.assign` collects `top_probs` and passes them to `_calculate_ece`.
+   - Proposed Next Step: Clarify the ECE definition in docs; optionally add multiclass ECE or one-vs-all variants if broader calibration is desired.
 
-# Full training
-./scripts/run_training.sh --full
+9) ID: UX-009
+   - Title: Duplicate RT sampling banners in logs
+   - Severity: Low
+   - Status: Open
+   - Summary: Both `train.py` and `rt_hierarchical.sample` print sampling info, leading to repeated lines.
+   - Evidence: Console output shows two “Sampling with …” banners for RT.
+   - Proposed Next Step: Print from one place to avoid redundancy.
 
-# Custom parameters
-PYTHONPATH=. python scripts/train.py \
-  --n-compounds 30 --n-species 40 \
-  --n-samples 500 --decoy-fraction 0.5 \
-  --probability-threshold 0.3
-```
+10) ID: UX-010
+    - Title: Step numbering duplication in training output
+    - Severity: Low
+    - Status: Open
+    - Summary: “5. Results” and “5. Training complete” both labeled as step 5.
+    - Evidence: `scripts/train.py` final console prints.
+    - Proposed Next Step: Renumber for clarity.
 
-## Critical Design Considerations
+## Notes on Code–Docs Alignment
+- RT model: Non-centered hierarchies, sum-to-zero constraints, priors, and predictive variance match docs. Covariate generation in the script currently deviates from the documented data-driven approach (see DAT-004).
+- Peak assignment: Minimal 4-feature set, explicit null, presence prior as log-additive offset, hierarchical logit noise, masking, and exchangeability are implemented and tested (see `tests/test_exchangeability.py`). Presence prior “online updates” are not exercised in batch training (see PRI-005).
 
-### Exchangeability Issue
-The model must handle **exchangeable candidates** - the slot position (1-8) is arbitrary and changes for each peak:
-- **Problem**: Slot k might contain compound #42 for one peak, but compound #7 for another
-- **Current solution**: Model uses features to score candidates, not slot positions
-- **Partial issue**: Presence priors are computed per-slot, breaking exchangeability
-- **Fix needed**: Presence priors should be compound-specific, not slot-specific
+## Suggested Order of Work
+1. EVA-001 (metrics fairness) — unblock trustworthy reporting.
+2. RTM-002 (PPC) — validate uncertainty used downstream.
+3. CFG-003 (target_accept) — restore CLI fidelity/reproducibility.
+4. DAT-004 (covariates) — align code/docs and scientific story.
+5. MCMC-006 (gating) — enforce basic MCMC quality checks.
+6. PRI-005 (presence updates) — decide policy and implement/clarify.
+7. PRI-007 (naming) — reduce confusion for maintainers.
+8. CAL-008 (ECE scope) — document or extend as needed.
+9. UX-009/UX-010 — clean logs and numbering.
 
-Example of the issue:
-```python
-# Peak 1: [null, caffeine, glucose, lysine, ...]
-# Peak 2: [null, tryptophan, caffeine, alanine, ...]
-# Caffeine is in slot 1 for peak 1, but slot 2 for peak 2!
-```
-
-### Production Scalability
-Real libraries have 1000s-10000s compounds, requiring:
-- **Fixed K_max**: Set conservatively (e.g., 50) based on mass/RT tolerances
-- **Dynamic masking**: Most peaks use <<50 candidates
-- **Pre-filtering**: If candidates exceed K_max, use fast heuristics to select top K
-- See `PRODUCTION_ARCHITECTURE.md` for detailed design
-
-## Next Steps / Future Work
-
-### 1. Fix Exchangeability (HIGH PRIORITY)
-- Make presence priors compound-specific, not slot-specific
-- Consider sorting candidates consistently by (mass_error, rt_error, compound_id)
-- Add relative features (rank by mass error, percentile scores)
-
-### 2. Active Learning Integration
-- Use uncertainty to prioritize peak labeling
-- Develop acquisition functions for compound-level uncertainty
-- Test with partial annotations
-
-### 3. Real Data Testing
-- Apply to actual metabolomics datasets
-- Validate presence prior assumptions
-- Tune hyperparameters for real scenarios
-
-### 4. Model Enhancements
-- Test alternative presence prior formulations
-- Experiment with compound embeddings
-- Add mass spectrum similarity features
-
-### 5. Performance Analysis
-- Profile computational bottlenecks
-- Optimize for larger compound libraries (1000s-10000s)
-- Parallelize candidate generation
-
-## Key Files
-- `src/compassign/peak_assignment.py`: Core assignment logic with dual candidates
-- `src/compassign/presence_prior.py`: Compound presence modeling
-- `scripts/train.py`: Main training pipeline
-- `scripts/create_synthetic_data.py`: Data generation with decoys
-
-## Important Notes
-- The 0% decoy assignment rate is a **feature**, not a bug
-- Presence priors effectively prevent false positives from library compounds not in samples
-- The system is ready for real metabolomics data with proper many-to-one support
