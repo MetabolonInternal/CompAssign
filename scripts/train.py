@@ -200,17 +200,18 @@ def main():
     rt_model.build_model(rt_df)
     
     print_flush(f"Sampling with {args.n_chains or 4} chains, {args.n_samples} samples each...")
-    print_flush(f"Target accept: {args.target_accept}, Max treedepth: 15")
+    used_target_accept = max(args.target_accept, 0.99)
+    print_flush(f"Target accept: {used_target_accept}, Max treedepth: 15")
     
     sample_kwargs = {
         'n_samples': args.n_samples,
         'n_tune': args.n_tune,
-        'target_accept': args.target_accept,
+        'target_accept': used_target_accept,
         'max_treedepth': 15,
         'random_seed': args.seed
     }
-    if args.n_chains is not None:
-        sample_kwargs['n_chains'] = args.n_chains
+    # Always pass an explicit chain count to keep logs consistent
+    sample_kwargs['n_chains'] = args.n_chains or 4
     
     trace_rt = rt_model.sample(**sample_kwargs)
     
@@ -221,11 +222,10 @@ def main():
     print_flush("\n3. Creating RT model diagnostic plots...")
     # For now, skip PPC and just pass empty dict
     create_all_diagnostic_plots(
-        trace_rt, 
+        trace_rt,
         {},  # No PPC results for now
-        output_path / "plots" / "rt_model"
+        output_path
     )
-    print_flush(f"Diagnostic plots saved to: {output_path / 'plots' / 'rt_model'}")
     
     # 4. Train softmax assignment model
     print_flush("\n4. Training peak assignment model...")
@@ -252,7 +252,6 @@ def main():
         peak_df=peak_df,
         compound_mass=compound_info['true_mass'].values,
         n_compounds=args.n_compounds,
-        species_cluster=hierarchical_params['species_cluster'],
         compound_info=compound_info,  # Pass compound_info to skip decoys during training
         initial_labeled_fraction=0.8  # 80% labeled for training
     )
@@ -412,7 +411,7 @@ def main():
         print_flush(f"  Library composition: {n_real} real, {n_decoys} decoys")
         print_flush(f"  Decoys incorrectly assigned: {decoys_assigned}/{n_decoys} ({decoys_assigned/n_decoys*100:.1f}%)")
         print_flush(f"  False positives from decoys: {decoys_assigned}")
-        print_flush(f"  False positives (total): {results.compound_metrics.get('false_positives', 0)}")
+        print_flush(f"  Compound false positives: {results.compound_metrics.get('false_positives', 0)}")
         
         # Show which decoys were assigned if any
         if decoys_assigned > 0 and hasattr(results, 'peaks_by_compound'):

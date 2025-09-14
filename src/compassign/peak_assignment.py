@@ -172,7 +172,6 @@ class PeakAssignment:
                               peak_df: pd.DataFrame,
                               compound_mass: np.ndarray,
                               n_compounds: int,
-                              species_cluster: np.ndarray,
                               compound_info: Optional[pd.DataFrame] = None,
                               init_presence: Optional[PresencePrior] = None,
                               initial_labeled_fraction: float = 0.0,
@@ -570,7 +569,7 @@ class PeakAssignment:
             candidates_map = self.train_pack['row_to_candidates_test']
             
             # Build presence prior matrix for test candidates
-            presence_matrix_test = np.zeros((N, self.K_max), dtype='float32')
+            presence_matrix_test = np.zeros((N, self.K_max), dtype=float)
             for i in range(N):
                 s = peak_species[i]
                 candidates = candidates_map[i]
@@ -583,47 +582,44 @@ class PeakAssignment:
                         if c is not None:
                             presence_matrix_test[i, k] = log_pi_compounds[c]
             
-            # Initialize probabilities
-            p_test = np.zeros((chains, draws, N, self.K_max))
-            
+            # Streaming mean across chains and draws (vectorized over peaks)
+            p_sum = np.zeros((N, self.K_max), dtype=float)
+            count = 0
             rng = np.random.default_rng(self.random_seed)
+
             for chain in range(chains):
                 for draw in range(draws):
-                    theta_features = theta_features_samples[chain, draw]
-                    theta0 = theta0_samples[chain, draw]
-                    theta_null = theta_null_samples[chain, draw]
+                    theta_features = theta_features_samples[chain, draw]  # (n_features,)
+                    theta0 = float(theta0_samples[chain, draw])
+                    theta_null = float(theta_null_samples[chain, draw])
                     sigma_logit = float(sigma_logit_samples[chain, draw])
-                    
-                    # Compute logits WITH presence priors
-                    logits = np.zeros((N, self.K_max))
-                    logits[:, 0] = theta_null + presence_matrix_test[:, 0]  # Null class with prior
-                    
-                    for i in range(N):
-                        for k in range(1, self.K_max):
-                            if mask[i, k]:
-                                # Include presence prior in logits
-                                logits[i, k] = theta0 + np.dot(X[i, k], theta_features) + presence_matrix_test[i, k]
-                            else:
-                                logits[i, k] = -np.inf  # Masked out
+
+                    # Feature contribution (N, K_max)
+                    feature_contrib = np.tensordot(X, theta_features, axes=([2], [0]))
+
+                    # Logits with presence priors (vectorized)
+                    logits = theta0 + feature_contrib + presence_matrix_test
+                    logits[:, 0] = theta_null + presence_matrix_test[:, 0]
+
+                    # Mask invalid slots
+                    logits = np.where(mask, logits, -np.inf)
 
                     # Add hierarchical logit noise
                     if sigma_logit > 0:
-                        noise = rng.standard_normal(size=(N, self.K_max)) * sigma_logit
+                        noise = rng.standard_normal(size=logits.shape) * sigma_logit
                         logits = logits + noise
-                    
-                    # Apply softmax with masking
-                    for i in range(N):
-                        valid_mask = mask[i]
-                        valid_logits = logits[i, valid_mask]
-                        
-                        # Softmax
-                        exp_logits = np.exp(valid_logits - np.max(valid_logits))
-                        probs = exp_logits / exp_logits.sum()
-                        
-                        p_test[chain, draw, i, valid_mask] = probs
-            
-            # Average across chains and draws
-            p_mean = p_test.mean(axis=(0, 1))
+
+                    # Softmax across valid slots
+                    m = np.max(logits, axis=1, keepdims=True)
+                    exp_logits = np.exp(logits - m)
+                    exp_logits = np.where(mask, exp_logits, 0.0)
+                    denom = np.sum(exp_logits, axis=1, keepdims=True)
+                    p = np.divide(exp_logits, denom, out=np.zeros_like(exp_logits), where=denom > 0)
+
+                    p_sum += p
+                    count += 1
+
+            p_mean = p_sum / max(count, 1)
         else:
             # Use training probabilities (original behavior)
             post = self.trace.posterior
@@ -773,11 +769,9 @@ class PeakAssignment:
         
         # Separate real vs decoy compounds if compound_info provided
         decoy_compounds = set()
-        real_compound_ids = set()
         if compound_info is not None and 'is_decoy' in compound_info.columns:
             # Get decoy compound IDs from the compound_id column
             decoy_compounds = set(compound_info[compound_info['is_decoy']]['compound_id'].values)
-            real_compound_ids = set(compound_info[~compound_info['is_decoy']]['compound_id'].values)
             
             # Filter predicted compounds into real vs decoy
             pred_real = pred_compounds - decoy_compounds

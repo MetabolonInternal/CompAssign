@@ -98,7 +98,6 @@ def test_candidate_order_invariance():
         peak_df=peak_df,
         compound_mass=compound_mass,
         n_compounds=n_compounds,
-        species_cluster=np.array([species] * len(peak_df)),
         init_presence=presence,
         initial_labeled_fraction=0.0,
         random_seed=0,

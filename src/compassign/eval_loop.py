@@ -509,13 +509,10 @@ def compare_oracles(
         # Regenerate training data with fresh presence priors
         n_species = len(np.unique(peak_df['species']))
         n_compounds = len(compound_mass)
-        species_cluster = peak_df['species'].values
-        
         fresh_model.generate_training_data(
             peak_df=peak_df,
             compound_mass=compound_mass,
             n_compounds=n_compounds,
-            species_cluster=species_cluster,
             init_presence=PresencePrior.init(n_species, n_compounds)
         )
         

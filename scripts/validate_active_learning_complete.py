@@ -88,7 +88,6 @@ def setup_sweet_spot_model_with_data(n_species=3, n_compounds=60, n_peaks_per_sp
         peak_df=peaks_df,
         compound_mass=compound_mass,
         n_compounds=len(compound_mass),
-        species_cluster=species_cluster,
         init_presence=PresencePrior.init(n_species, len(compound_mass)),
         initial_labeled_fraction=0.02,
         random_seed=seed,
@@ -325,7 +324,6 @@ def setup_realistic_model_with_data(n_species=5, n_compounds=100, n_peaks_per_sp
         peak_df=peak_df,
         compound_mass=compound_mass[:n_compounds-n_isomers],  # Original compounds only
         n_compounds=n_compounds - n_isomers,
-        species_cluster=species_cluster,
         init_presence=PresencePrior.init(n_species, n_compounds - n_isomers)
     )
     
@@ -420,7 +418,6 @@ def setup_model_with_data(n_species=3, n_compounds=60, n_peaks_per_species=150,
         peak_df=peak_df,
         compound_mass=compound_mass,
         n_compounds=n_compounds,
-        species_cluster=species_cluster,
         init_presence=PresencePrior.init(n_species, n_compounds)
     )
     
