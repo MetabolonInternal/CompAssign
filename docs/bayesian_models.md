@@ -2,7 +2,7 @@
 
 ## Abstract
 
-This document provides the formal mathematical specifications for the two-stage Bayesian framework implemented in CompAssign for metabolomics compound assignment. The framework consists of a hierarchical Bayesian model for retention time (RT) prediction (with standardized covariates, non-centered sampling, and sum-to-zero constraints) followed by a calibrated logistic regression model with 9 features for peak-to-compound assignment.
+This document provides the formal mathematical specifications for the two-stage Bayesian framework implemented in CompAssign for metabolomics compound assignment. The framework consists of a hierarchical Bayesian model for retention time (RT) prediction (with standardized covariates, non-centered sampling, and sum-to-zero constraints) followed by a hierarchical softmax peak assignment model with presence priors and an explicit null class.
 
 ## 1. Hierarchical Retention Time Model
 
@@ -82,76 +82,79 @@ Weakly informative priors are used, adapted to standardized covariates:
 
 ## 2. Peak Assignment Model
 
-The assignment model consumes the RT predictions from the hierarchical model and produces calibrated, interpretable probabilities for peak-to-compound matches using a 9-feature logistic regression.
+The assignment model consumes the RT predictions from the hierarchical model and produces calibrated, interpretable probabilities for peak-to-compound matches using a hierarchical softmax with an explicit null class and compound presence priors. The model is exchangeable with respect to the ordering of non-null candidates.
 
-### 2.1 Feature Construction
+### 2.1 Candidate Filtering and Feature Construction
 
-For each peak–compound pair \$(p, c)\$, nine features are computed in three groups:
-
-#### Core (Primary Signals)
-
-1. **Mass error (ppm)**: \$\Delta m\_{pc} = \dfrac{m\_p - m\_c}{m\_c} \times 10^6\$
-2. **RT \$z\$-score**: \$z\_{pc} = \dfrac{t\_p - \hat{t}\_c}{\hat{\sigma}\_c}\$
-3. **Log intensity**: \$\ell\_p = \log(1 + I\_p)\$
-
-#### Confidence Scores (Soft penalties)
-
-4. **Mass confidence**: \$\psi\_m = \exp!\big(-|\Delta m\_{pc}| / 10\big)\$
-5. **RT confidence**: \$\psi\_t = \exp!\big(-|z\_{pc}| / 3\big)\$
-6. **Combined confidence**: \$\psi\_{mt} = \psi\_m \times \psi\_t\$
-
-#### Context (Priors / Uncertainty)
-
-7. **Log compound mass**: \$\kappa\_c = \log(m\_c)\$
-8. **Log RT uncertainty**: \$\upsilon\_c = \log(\hat{\sigma}\_c + 10^{-6})\$
-9. **Log relative intensity**: \$\rho\_p = \log!\big(1 + I\_p / \tilde{I}\_{s(p)}\big)\$
-
-where:
-
-* \$m\_p\$ and \$t\_p\$ are the observed mass and RT of peak \$p\$,
-* \$m\_c\$ is the theoretical mass for compound \$c\$,
-* \$(\hat{t}\_c, \hat{\sigma}\_c)\$ are the predictive mean and **predictive** standard deviation for compound \$c\$ (see §3.2),
-* \$\tilde{I}\_{s(p)}\$ is the median peak intensity within the same species as peak \$p\$.
-
-### 2.2 Calibrated Logistic Regression
-
-Let \$\mathbf{f}*{pc} = \[\Delta m*{pc}, z\_{pc}, \ell\_p, \psi\_m, \psi\_t, \psi\_{mt}, \kappa\_c, \upsilon\_c, \rho\_p]^\top\$ denote the 9-dimensional feature vector **after standardization**. The assignment probability is
+For peak \(i\) and compound \(c\) in species \(s(i)\), we first define the candidate set \(C_i\) by mass and RT filters:
 
 ```math
-\text{logit}\,P(y_{pc}=1 \mid \mathbf{f}_{pc}) = \phi_0 + \sum_{k=1}^{9} \phi_k f_k
+|m_i - m_c| \leq \tau_m, \qquad \left| \frac{t_i - \hat{t}_{s(i)c}}{\hat{\sigma}_{s(i)c}} \right| \leq k
 ```
 
-Probabilities are calibrated post-hoc. By default, **temperature scaling** is applied to the logits \$\eta\$:
+For each candidate \(c_k \in C_i\), we compute a minimal 4-feature vector (then standardize feature-wise using training statistics):
 
 ```math
-\tilde{\eta} = \eta / T, \qquad p_{\mathrm{cal}} = \sigma(\tilde{\eta})
+\mathbf{x}_{ik} = \left[\, \Delta m^{\mathrm{ppm}}_{ik},\ z^{\mathrm{RT}}_{ik},\ \log(1 + I_i),\ \log(\hat{\sigma}_{s(i)c_k} + 10^{-6}) \,\right]^\top
 ```
 
-An **isotonic regression** option is also available.
+where \(\Delta m^{\mathrm{ppm}}\) is the mass error in ppm, \(z^{\mathrm{RT}}\) is the RT z-score using the RT model’s predictive mean and variance, and \(I_i\) is the peak intensity. An extended 9-feature variant is available for ablations, but the default model uses the 4-feature set above.
 
-### 2.3 Standardization, Class Balancing, Calibration
+### 2.2 Likelihood with Hierarchical Uncertainty
 
-1. **Standardization**: All 9 features are standardized to zero mean and unit variance. The scaler is fit on the training subset and applied to all rows.
-2. **Class Balancing**: During likelihood construction, the minority class is over-sampled to balance positives and negatives, preventing a bias toward the majority class.
-3. **Calibration**: Temperature \$T\$ is fitted by minimizing negative log-likelihood on a held-out calibration split when provided (otherwise on the available data). Isotonic calibration can be selected as an alternative.
-
-### 2.4 Priors for Logistic Weights
-
-With standardized features, we use tight normal priors:
+We model assignment for peak \(i\) over \(K_i + 1\) classes (\(K_i\) candidates plus an explicit null class \(k=0\)):
 
 ```math
-\phi_0 \sim \mathcal{N}(0, 1.0)
+\eta_{i0} = \theta_{\text{null}} + \log \pi_{\text{null}}
 ```
 
 ```math
-\phi_k \sim \mathcal{N}(0, 1.0), \quad k \in \{1, \ldots, 9\}
+\eta_{ik} = \theta_0 + \boldsymbol{\theta}^\top \mathbf{x}_{ik} + \log \pi_{s(i), c_k} \quad (k=1,\ldots,K_i)
 ```
+
+To capture uncertainty at the logit level, we introduce a shared noise scale \(\sigma_{\text{logit}}\):
+
+```math
+\tilde{\eta}_{ik} \mid \eta_{ik}, \sigma_{\text{logit}} \sim \mathcal{N}(\eta_{ik},\ \sigma_{\text{logit}}^2)
+```
+
+Class probabilities are the softmax of the noisy logits:
+
+```math
+\mathbf{p}_i = \operatorname{softmax}\big(\, [\tilde{\eta}_{i0},\tilde{\eta}_{i1},\ldots,\tilde{\eta}_{iK_i}] \,\big), \qquad y_i \sim \operatorname{Categorical}(\mathbf{p}_i)
+```
+
+Masking handles ragged candidate sets; invalid slots are assigned a large negative logit before softmax for numerical stability.
+
+### 2.3 Priors and Presence Priors
+
+With standardized features, we place tight Normal priors:
+
+```math
+\theta_0 \sim \mathcal{N}(0,1), \qquad \boldsymbol{\theta} \sim \mathcal{N}(\mathbf{0}, \mathbf{I}), \qquad \theta_{\text{null}} \sim \mathcal{N}(-1,1)
+```
+
+```math
+\sigma_{\text{logit}} \sim \operatorname{HalfNormal}(0.5)
+```
+
+Compound presence priors enter as log-offsets:
+
+```math
+\pi_{sc} \sim \operatorname{Beta}(\alpha_{sc}, \beta_{sc}), \quad \log \pi_{s(i), c_k} \text{ added to } \eta_{ik}
+```
+
+The null class has a separate global prior \(\pi_{\text{null}} \sim \operatorname{Beta}(\alpha_{\text{null}}, \beta_{\text{null}})\). Presence priors are updated online from annotations: positive labels increment \(\alpha_{sc}\), negative labels increment \(\beta_{sc}\).
+
+### 2.4 Exchangeability and Decision Rule
+
+All non-null candidate slots share the same parameterization; only the null slot is distinguished. Therefore, the model is exchangeable with respect to the ordering of candidates \(k>0\). At prediction time, we compute \(\mathbf{p}_i\) over the test candidate set and apply a probability threshold \(\tau_p\): assign the argmax compound if its probability \(\geq \tau_p\) and \(k>0\); otherwise assign null. Many-to-one assignments (multiple peaks per compound) are allowed by design; there is no global one-to-one matching across peaks.
 
 ## 3. Inference and Implementation
 
 ### 3.1 Posterior Sampling
 
-Both the hierarchical RT model and the logistic regression are fit with the No-U-Turn Sampler (NUTS). The RT model uses non-centered parameterizations and sum-to-zero constraints for stable, efficient sampling; the logistic model is trained on standardized, class-balanced data and then calibrated.
+Both the hierarchical RT model and the softmax assignment model are fit with the No-U-Turn Sampler (NUTS). The RT model uses non-centered parameterizations and sum-to-zero constraints for stable, efficient sampling. The assignment model uses standardized features and hierarchical logit noise (\(\sigma_{\text{logit}}\)).
 
 ### 3.2 Uncertainty Propagation
 
@@ -165,66 +168,16 @@ This yields **predictive** uncertainty, not merely posterior uncertainty of para
 
 ### 3.3 Assignment Strategy
 
-After computing calibrated probabilities for all candidate pairs:
+After filtering candidates by mass and RT window, we compute softmax probabilities with presence priors and hierarchical logit noise. The decision rule is:
 
-1. **Mass filter**: Keep candidates with \$|\Delta m\_{pc}| < \tau\_m\$ (default \$\tau\_m = 0.005\$ Da).
-2. **RT window**: Keep candidates with \$|z\_{pc}| < k\$ (default \$k = 1.5\$).
-3. **Probability threshold**: Accept if \$P(y\_{pc}=1) \ge \tau\_p\$ with a **meaningful default** \$\tau\_p = 0.5\$ (due to probability calibration).
+1. **Probability threshold**: Accept the top compound if \(\max_k p(y_i=k) \ge \tau_p\) and \(k>0\); otherwise assign null.
+2. **Many-to-one allowed**: No global matching is enforced across peaks; multiple peaks may be assigned to the same compound.
+## 4. Implementation Notes
 
-A greedy matching ensures each peak is assigned to at most one compound, choosing the highest probability above threshold.
-
-## 4. Softmax Assignment Model with Null Class
-
-The softmax variant enforces exclusivity constraints directly and includes explicit null assignments for unmatched peaks.
-
-### 4.1 Model Specification
-
-For each peak $i$ with candidate set $C_i$ (compounds passing mass filter), we model assignment as a categorical distribution over $K_i + 1$ classes (candidates plus null):
-
-```math
-p(y_i = k | \mathbf{X}_i, \boldsymbol{\theta}) = \frac{\exp(\eta_{ik} / T)}{\sum_{j=0}^{K_i} \exp(\eta_{ij} / T)}
-```
-
-where the logits are:
-
-```math
-\eta_{i0} = \theta_{\text{null}} + \log \pi_{\text{null}}
-```
-
-```math
-\eta_{ik} = \theta_0 + \boldsymbol{\theta}^\top \mathbf{x}_{ik} + \log \pi_{s(i),c_k} \quad \text{for } k > 0
-```
-
-Here:
-- $k = 0$ represents the null class (no compound assigned)
-- $\mathbf{x}_{ik}$ are the 9 features for peak $i$ and candidate $c_k$
-- $\pi_{sc}$ is the prior probability that compound $c$ occurs in species $s$
-- $T$ is a temperature parameter for calibration
-
-### 4.2 Compound Presence Priors
-
-We maintain Beta-Bernoulli priors for compound presence:
-
-```math
-\pi_{sc} \sim \text{Beta}(\alpha_{sc}, \beta_{sc})
-```
-
-Initially $\alpha_{sc} = \beta_{sc} = 1$ (uniform). These are updated online:
-- Positive annotation: $\alpha_{sc} \leftarrow \alpha_{sc} + 1$
-- Negative annotation: $\beta_{sc} \leftarrow \beta_{sc} + 1$
-
-### 4.3 Key Advantages
-
-1. **Exclusivity**: Softmax ensures exactly one assignment per peak
-2. **Null handling**: Explicit modeling of unmatched peaks
-3. **Online learning**: Presence priors update with human feedback
-4. **Calibration**: Temperature scaling provides in-model calibration
-
-### 4.4 Implementation Details
-
-- **Ragged to padded**: Variable candidate counts handled via masking
-- **Numerical stability**: Invalid slots masked with $\eta = -10^9$
-- **Temperature prior**: $\log T \sim \mathcal{N}(0, 0.5)$ ensures $T > 0$
+- **Ragged to padded**: Variable candidate counts handled via masking.
+- **Numerical stability**: Invalid slots masked with a large negative logit (e.g., \(-10^9\)).
+- **Exchangeability**: Non-null candidate slots are treated identically; ordering does not affect probabilities.
+- **Training vs. testing candidates**: To avoid leakage, decoy compounds can be excluded from training candidate sets and included at test time with presence priors.
 
 ## 5. Active Learning Integration
 

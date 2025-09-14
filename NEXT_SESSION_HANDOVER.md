@@ -75,24 +75,52 @@ PYTHONPATH=. python scripts/train.py \
   --probability-threshold 0.3
 ```
 
+## Critical Design Considerations
+
+### Exchangeability Issue
+The model must handle **exchangeable candidates** - the slot position (1-8) is arbitrary and changes for each peak:
+- **Problem**: Slot k might contain compound #42 for one peak, but compound #7 for another
+- **Current solution**: Model uses features to score candidates, not slot positions
+- **Partial issue**: Presence priors are computed per-slot, breaking exchangeability
+- **Fix needed**: Presence priors should be compound-specific, not slot-specific
+
+Example of the issue:
+```python
+# Peak 1: [null, caffeine, glucose, lysine, ...]
+# Peak 2: [null, tryptophan, caffeine, alanine, ...]
+# Caffeine is in slot 1 for peak 1, but slot 2 for peak 2!
+```
+
+### Production Scalability
+Real libraries have 1000s-10000s compounds, requiring:
+- **Fixed K_max**: Set conservatively (e.g., 50) based on mass/RT tolerances
+- **Dynamic masking**: Most peaks use <<50 candidates
+- **Pre-filtering**: If candidates exceed K_max, use fast heuristics to select top K
+- See `PRODUCTION_ARCHITECTURE.md` for detailed design
+
 ## Next Steps / Future Work
 
-### 1. Active Learning Integration
+### 1. Fix Exchangeability (HIGH PRIORITY)
+- Make presence priors compound-specific, not slot-specific
+- Consider sorting candidates consistently by (mass_error, rt_error, compound_id)
+- Add relative features (rank by mass error, percentile scores)
+
+### 2. Active Learning Integration
 - Use uncertainty to prioritize peak labeling
 - Develop acquisition functions for compound-level uncertainty
 - Test with partial annotations
 
-### 2. Real Data Testing
+### 3. Real Data Testing
 - Apply to actual metabolomics datasets
 - Validate presence prior assumptions
 - Tune hyperparameters for real scenarios
 
-### 3. Model Enhancements
+### 4. Model Enhancements
 - Test alternative presence prior formulations
 - Experiment with compound embeddings
 - Add mass spectrum similarity features
 
-### 4. Performance Analysis
+### 5. Performance Analysis
 - Profile computational bottlenecks
 - Optimize for larger compound libraries (1000s-10000s)
 - Parallelize candidate generation

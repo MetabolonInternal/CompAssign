@@ -234,7 +234,6 @@ def main():
     assignment_model = PeakAssignment(
         mass_tolerance=args.mass_tolerance,
         rt_window_k=args.rt_window_k,
-        use_minimal_features=True,
         random_seed=args.seed
     )
     

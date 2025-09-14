@@ -83,7 +83,6 @@ class PeakAssignment:
     def __init__(self,
                  mass_tolerance: float = 0.005,
                  rt_window_k: float = 1.5,
-                 use_minimal_features: bool = True,
                  random_seed: int = 42):
         """
         Initialize the hierarchical Bayesian model.
@@ -94,14 +93,11 @@ class PeakAssignment:
             Mass tolerance in Da for candidate generation
         rt_window_k : float
             RT window multiplier (in standard deviations)
-        use_minimal_features : bool
-            If True, use only minimal feature set (4 features)
         random_seed : int
             Random seed for reproducibility
         """
         self.mass_tolerance = mass_tolerance
         self.rt_window_k = rt_window_k
-        self.use_minimal_features = use_minimal_features
         self.random_seed = random_seed
         
         # Initialize random state
@@ -206,6 +202,7 @@ class PeakAssignment:
         peak_candidates_train = []  # Training candidates (no decoys)
         peak_candidates_test = []   # Test candidates (all compounds)
         peak_labels = []
+        true_compounds_list = []
         peak_species = []
         peak_ids = []
         
@@ -250,36 +247,13 @@ class PeakAssignment:
                 if abs(rt_z) > self.rt_window_k:
                     continue
                 
-                # Build feature list - MINIMAL or ALL
-                if self.use_minimal_features:
-                    # Only 4 essential features
-                    feat = [
-                        mass_error_ppm,                    # Core
-                        rt_z,                              # Core
-                        np.log1p(intensity),               # Quality
-                        np.log(rt_pred_std + 1e-6)        # Uncertainty
-                    ]
-                else:
-                    # Include additional features for comparison
-                    log_intensity = np.log1p(intensity)
-                    mass_confidence = np.exp(-abs(mass_error_ppm) / 10)
-                    rt_confidence = np.exp(-abs(rt_z) / 3)
-                    combined_confidence = mass_confidence * rt_confidence
-                    log_compound_mass = np.log(compound_mass[m])
-                    log_rt_uncertainty = np.log(rt_pred_std + 1e-6)
-                    log_relative_intensity = np.log1p(intensity / median_intensity) if median_intensity > 0 else 0
-                    
-                    feat = [
-                        mass_error_ppm,
-                        rt_z,
-                        log_intensity,
-                        mass_confidence,
-                        rt_confidence,
-                        combined_confidence,
-                        log_compound_mass,
-                        log_rt_uncertainty,
-                        log_relative_intensity
-                    ]
+                # Build feature list - fixed minimal feature set (4 features)
+                feat = [
+                    mass_error_ppm,                    # Core
+                    rt_z,                              # Core
+                    np.log1p(intensity),               # Quality
+                    np.log(rt_pred_std + 1e-6)        # Uncertainty
+                ]
                 
                 candidates_train.append(m)
                 features_train.append(feat)
@@ -307,34 +281,13 @@ class PeakAssignment:
                 if abs(rt_z) > self.rt_window_k:
                     continue
                 
-                # Build same features for test candidates
-                if self.use_minimal_features:
-                    feat = [
-                        mass_error_ppm,
-                        rt_z,
-                        np.log1p(intensity),
-                        np.log(rt_pred_std + 1e-6)
-                    ]
-                else:
-                    log_intensity = np.log1p(intensity)
-                    mass_confidence = np.exp(-abs(mass_error_ppm) / 10)
-                    rt_confidence = np.exp(-abs(rt_z) / 3)
-                    combined_confidence = mass_confidence * rt_confidence
-                    log_compound_mass = np.log(compound_mass[m])
-                    log_rt_uncertainty = np.log(rt_pred_std + 1e-6)
-                    log_relative_intensity = np.log1p(intensity / median_intensity) if median_intensity > 0 else 0
-                    
-                    feat = [
-                        mass_error_ppm,
-                        rt_z,
-                        log_intensity,
-                        mass_confidence,
-                        rt_confidence,
-                        combined_confidence,
-                        log_compound_mass,
-                        log_rt_uncertainty,
-                        log_relative_intensity
-                    ]
+                # Build same features for test candidates (4 features)
+                feat = [
+                    mass_error_ppm,
+                    rt_z,
+                    np.log1p(intensity),
+                    np.log(rt_pred_std + 1e-6)
+                ]
                 
                 candidates_test.append(m)
                 features_test.append(feat)
@@ -345,6 +298,9 @@ class PeakAssignment:
             peak_species.append(s)
             peak_ids.append(peak_id)
             
+            # Track true compound id for evaluation (independent of candidate presence)
+            true_compounds_list.append(true_comp)
+
             # Determine label (0 for null, 1+ for compound position)
             if true_comp is None:
                 peak_labels.append(0)  # Null
@@ -364,18 +320,11 @@ class PeakAssignment:
         self.K_max_train = max_candidates_train + 1  # For training-specific operations
         self.K_max_test = max_candidates_test + 1  # For test-specific operations
         
-        # Determine number of features
-        n_features = 4 if self.use_minimal_features else 9
+        # Determine number of features (fixed minimal set)
+        n_features = 4
         
-        # Store feature names
-        if self.use_minimal_features:
-            self.feature_names = self.MINIMAL_FEATURES
-        else:
-            self.feature_names = [
-                'mass_err_ppm', 'rt_z', 'log_intensity',
-                'mass_confidence', 'rt_confidence', 'combined_confidence',
-                'log_compound_mass', 'log_rt_uncertainty', 'log_relative_intensity'
-            ]
+        # Store feature names (fixed minimal set)
+        self.feature_names = self.MINIMAL_FEATURES
         
         # Log simplified statistics
         if compound_info is not None and 'is_decoy' in compound_info.columns:
@@ -464,6 +413,7 @@ class PeakAssignment:
             'mask_test': mask_test,  # Test mask
             'labels': labels,
             'true_labels': true_labels,
+            'true_compounds': np.array(true_compounds_list, dtype=object),
             'peak_to_row': peak_to_row,
             'row_to_candidates': row_to_candidates_train,  # Training candidates (no decoys)
             'row_to_candidates_test': row_to_candidates_test,  # Test candidates (all)
@@ -608,6 +558,7 @@ class PeakAssignment:
             theta_features_samples = post['theta_features'].values  # Shape: (chains, draws, n_features)
             theta0_samples = post['theta0'].values  # Shape: (chains, draws)
             theta_null_samples = post['theta_null'].values  # Shape: (chains, draws)
+            sigma_logit_samples = post['sigma_logit'].values  # Shape: (chains, draws)
             
             # Compute logits for test features
             N = X.shape[0]
@@ -635,11 +586,13 @@ class PeakAssignment:
             # Initialize probabilities
             p_test = np.zeros((chains, draws, N, self.K_max))
             
+            rng = np.random.default_rng(self.random_seed)
             for chain in range(chains):
                 for draw in range(draws):
                     theta_features = theta_features_samples[chain, draw]
                     theta0 = theta0_samples[chain, draw]
                     theta_null = theta_null_samples[chain, draw]
+                    sigma_logit = float(sigma_logit_samples[chain, draw])
                     
                     # Compute logits WITH presence priors
                     logits = np.zeros((N, self.K_max))
@@ -652,6 +605,11 @@ class PeakAssignment:
                                 logits[i, k] = theta0 + np.dot(X[i, k], theta_features) + presence_matrix_test[i, k]
                             else:
                                 logits[i, k] = -np.inf  # Masked out
+
+                    # Add hierarchical logit noise
+                    if sigma_logit > 0:
+                        noise = rng.standard_normal(size=(N, self.K_max)) * sigma_logit
+                        logits = logits + noise
                     
                     # Apply softmax with masking
                     for i in range(N):
@@ -742,40 +700,23 @@ class PeakAssignment:
         # Get ground truth
         true_labels = self.train_pack.get('true_labels', self.train_pack['labels'])
         peak_ids = self.train_pack['peak_ids']
-        # Use training candidates for ground truth (they match the labels)
+        # Use true compound ids independent of candidate presence
+        true_compounds = self.train_pack.get('true_compounds')
+        # Keep row_to_candidates for mapping indices to compound IDs where needed
         row_to_candidates = self.train_pack['row_to_candidates']
+        train_labels = self.train_pack.get('labels', np.full_like(true_labels, -1))
         
         # Build mappings for many-to-one evaluation
         true_peaks_by_compound = defaultdict(list)
         pred_peaks_by_compound = defaultdict(list)
         
         # FIRST PASS: Build compound mappings from ALL peaks (for compound-level metrics)
-        # This ensures metrics match what's saved in the CSV
-        for i, (peak_id, label) in enumerate(zip(peak_ids, true_labels)):
+        for i, peak_id in enumerate(peak_ids):
             pred = assignments.get(peak_id)
-            candidates = row_to_candidates[i]
-            
-            # Get true compound (handle both training and test peaks)
-            if label < 0:
-                # Training peak - negative indicates it's in training set
-                # Use absolute value as the label
-                true_label = abs(label)
-                if true_label >= len(candidates):
-                    continue  # Skip if index out of range
-                if true_label == 0:
-                    true_comp = None
-                else:
-                    true_comp = candidates[true_label]
-                    true_peaks_by_compound[true_comp].append(peak_id)
-            else:
-                # Test peak - use label directly
-                if label == 0:
-                    true_comp = None
-                else:
-                    if label >= len(candidates):
-                        continue  # Skip if index out of range
-                    true_comp = candidates[label]
-                    true_peaks_by_compound[true_comp].append(peak_id)
+            true_comp = true_compounds[i] if true_compounds is not None else None
+            if pd.notna(true_comp) if isinstance(true_comp, (np.floating, float)) else (true_comp is not None):
+                true_comp = int(true_comp)
+                true_peaks_by_compound[true_comp].append(peak_id)
             
             # Track predicted compounds
             if pred is not None:
@@ -791,17 +732,14 @@ class PeakAssignment:
         for i, (peak_id, label) in enumerate(zip(peak_ids, true_labels)):
             if int(peak_id) not in eval_set:
                 continue
-            if label < 0:
-                continue  # Skip training peaks for peak-level metrics
+            # Skip TRAINING peaks if they were labeled (evaluate test set only)
+            if train_labels[i] >= 0:
+                continue
             
             pred = assignments.get(peak_id)
-            candidates = row_to_candidates[i]
-            
-            # Get true compound for peak-level metrics
-            if label == 0:
-                true_comp = None
-            else:
-                true_comp = candidates[label]
+            # Use true compound id directly (may be outside candidate set)
+            tc = true_compounds[i] if true_compounds is not None else None
+            true_comp = None if (tc is None or (isinstance(tc, float) and np.isnan(tc))) else int(tc)
             
             # CORRECTED Peak-level metrics for many-to-one
             if true_comp is None:
@@ -830,7 +768,7 @@ class PeakAssignment:
         f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
         
         # COMPOUND-LEVEL METRICS (PRIMARY)
-        true_compounds = set(true_peaks_by_compound.keys())
+        true_compounds_set = set(true_peaks_by_compound.keys())
         pred_compounds = set(pred_peaks_by_compound.keys())
         
         # Separate real vs decoy compounds if compound_info provided
@@ -846,24 +784,24 @@ class PeakAssignment:
             pred_decoys = pred_compounds & decoy_compounds
             
             # True positives: predicted real compounds that are in true_compounds
-            correct_compounds = pred_real & true_compounds
+            correct_compounds = pred_real & true_compounds_set
             # False positives: predicted decoys + predicted real not in true_compounds
-            false_positive_compounds = pred_decoys | (pred_real - true_compounds)
+            false_positive_compounds = pred_decoys | (pred_real - true_compounds_set)
             # Missed compounds: true compounds not predicted
-            missed_compounds = true_compounds - pred_compounds
+            missed_compounds = true_compounds_set - pred_compounds
             
             # Calculate metrics with decoy awareness
             total_predicted = len(pred_compounds)
             compound_precision = len(correct_compounds) / total_predicted if total_predicted > 0 else 0
-            compound_recall = len(correct_compounds) / len(true_compounds) if true_compounds else 0
+            compound_recall = len(correct_compounds) / len(true_compounds_set) if true_compounds_set else 0
         else:
             # Original calculation (no decoy info)
-            correct_compounds = pred_compounds & true_compounds
-            false_positive_compounds = pred_compounds - true_compounds
-            missed_compounds = true_compounds - pred_compounds
+            correct_compounds = pred_compounds & true_compounds_set
+            false_positive_compounds = pred_compounds - true_compounds_set
+            missed_compounds = true_compounds_set - pred_compounds
             
             compound_precision = len(correct_compounds) / len(pred_compounds) if pred_compounds else 0
-            compound_recall = len(correct_compounds) / len(true_compounds) if true_compounds else 0
+            compound_recall = len(correct_compounds) / len(true_compounds_set) if true_compounds_set else 0
             pred_decoys = set()
         
         compound_f1 = 2 * compound_precision * compound_recall / (compound_precision + compound_recall) \
@@ -871,7 +809,7 @@ class PeakAssignment:
         
         # COVERAGE METRICS
         coverage_per_compound = {}
-        for compound in true_compounds:
+        for compound in true_compounds_set:
             true_peaks = set(true_peaks_by_compound[compound])
             pred_peaks = set(pred_peaks_by_compound.get(compound, []))
             coverage = len(true_peaks & pred_peaks) / len(true_peaks) if true_peaks else 0
@@ -899,7 +837,7 @@ class PeakAssignment:
             compound_f1=compound_f1,
             compound_metrics={
                 'identified': len(correct_compounds),
-                'total': len(true_compounds),
+                'total': len(true_compounds_set),
                 'false_positives': len(false_positive_compounds),
                 'missed': len(missed_compounds),
                 'decoys_assigned': len(pred_decoys) if compound_info is not None else 0

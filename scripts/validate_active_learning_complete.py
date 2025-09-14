@@ -68,7 +68,6 @@ def setup_sweet_spot_model_with_data(n_species=3, n_compounds=60, n_peaks_per_sp
     model = PeakAssignment(
         mass_tolerance=0.15,  # Must match generator tolerance scale
         rt_window_k=2.0,
-        use_minimal_features=True,
         random_seed=seed,
     )
 
@@ -295,7 +294,6 @@ def setup_realistic_model_with_data(n_species=5, n_compounds=100, n_peaks_per_sp
     model = PeakAssignment(
         mass_tolerance=0.01,  # 10 ppm tolerance
         rt_window_k=2.5,  # Tighter RT window since predictions are worse
-        use_minimal_features=True,
         random_seed=seed
     )
     
@@ -405,7 +403,6 @@ def setup_model_with_data(n_species=3, n_compounds=60, n_peaks_per_species=150,
     model = PeakAssignment(
         mass_tolerance=0.005,
         rt_window_k=3.0,
-        use_minimal_features=True,
         random_seed=seed
     )
     

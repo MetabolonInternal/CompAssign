@@ -500,7 +500,6 @@ def compare_oracles(
         fresh_model = PeakAssignment(
             mass_tolerance=assignment_model.mass_tolerance,
             rt_window_k=assignment_model.rt_window_k,
-            use_minimal_features=assignment_model.use_minimal_features,
             random_seed=assignment_model.random_seed
         )
         

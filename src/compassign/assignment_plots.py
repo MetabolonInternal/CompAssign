@@ -1,7 +1,7 @@
 """
 Visualization for peak assignment model and overall performance evaluation.
 
-This module provides plots for assessing the logistic regression model
+This module provides plots for assessing the assignment model
 and comparing RT predictions with peak assignments.
 """
 
@@ -33,14 +33,14 @@ def create_assignment_plots(logit_df: pd.DataFrame,
                            test_peak_ids: Optional[set] = None,
                            threshold: float = 0.5):
     """
-    Create all plots for the peak assignment model.
+    Create diagnostic plots for the peak assignment model.
     
     Parameters
     ----------
     logit_df : pd.DataFrame
-        Logistic training data with features and predictions
+        Data frame of per-candidate features and labels for plotting
     assignment_trace : az.InferenceData
-        Posterior samples from logistic model
+        Posterior samples from the assignment model
     assignment_results : dict
         Assignment results including confusion matrix
     output_path : Path
@@ -88,7 +88,7 @@ def create_assignment_plots(logit_df: pd.DataFrame,
 
 
 def plot_logistic_coefficients(trace: az.InferenceData, plots_path: Path, feature_names: Optional[list] = None):
-    """Plot posterior distributions of logistic regression coefficients."""
+    """Plot posterior distributions of assignment model coefficients."""
     # Check what variables are available
     if 'theta_features' in trace.posterior:
         # New model with feature vector
@@ -155,9 +155,9 @@ def plot_logistic_coefficients(trace: az.InferenceData, plots_path: Path, featur
             ax.set_title('Posterior: Intercept')
             ax.legend()
     
-    plt.suptitle('Logistic Model Coefficient Posteriors', fontsize=14)
+    plt.suptitle('Assignment Model Coefficient Posteriors', fontsize=14)
     plt.tight_layout()
-    plt.savefig(plots_path / "logistic_coefficients.png", dpi=100, bbox_inches='tight')
+    plt.savefig(plots_path / "assignment_coefficients.png", dpi=100, bbox_inches='tight')
     plt.close()
 
 
@@ -203,8 +203,6 @@ def plot_feature_distributions(logit_df: pd.DataFrame, plots_path: Path):
         'rt_err_normalized': 'RT Error (Normalized)',
         'abs_rt_z': 'Absolute RT Z-score',
         'rt_z_sq': 'RT Z-score Squared',
-        'rt_confidence': 'RT Confidence',
-        'combined_confidence': 'Combined Confidence',
         'log_rt_uncertainty': 'Log RT Uncertainty'
     }
     labels = [label_map.get(f, f.replace('_', ' ').title()) for f in features]
@@ -537,10 +535,6 @@ def plot_feature_importance(trace: az.InferenceData, logit_df: pd.DataFrame, plo
             display_labels.append('|RT Z|')
         elif feat == 'rt_z_sq':
             display_labels.append('RT Z²')
-        elif feat == 'rt_confidence':
-            display_labels.append('RT Conf')
-        elif feat == 'combined_confidence':
-            display_labels.append('Combined Conf')
         else:
             # Shorten long feature names
             display_labels.append(feat[:12])
