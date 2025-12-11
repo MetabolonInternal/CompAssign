@@ -1,0 +1,54 @@
+[tool.poetry]
+name = "compassign"
+version = "1.0.0"
+description = "Bayesian framework for ultra-high precision compound assignment in untargeted metabolomics"
+authors = ["Metabolon Internal"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.12"
+pymc = ">=5.25,<5.26"
+arviz = ">=0.22,<0.23"
+numpy = ">=1.26,<1.27"
+pandas = ">=2.3,<2.4"
+scipy = ">=1.16,<1.17"
+pytensor = ">=2.31,<2.32"
+scikit-learn = ">=1.7,<1.8"
+matplotlib = ">=3.10,<3.11"
+seaborn = ">=0.13,<0.14"
+h5py = ">=3.14,<3.15"
+netcdf4 = ">=1.6,<1.7"
+xarray = ">=2025.7,<2025.8"
+tabulate = "^0.9.0"
+tqdm = "^4.65.0"
+transformers = "~4.44.2"
+# Pin to a version that is available across macOS x86_64 and arm64.
+# This ensures Poetry can resolve and install without ABI issues.
+torch = "==2.2.2"
+pyarrow = ">=16,<17"
+sqlalchemy = ">=2.0,<3.0"
+oracledb = ">=2.4,<3.0"
+python-dotenv = ">=1.0,<2.0"
+
+[tool.poetry.group.dev.dependencies]
+jupyter = "^1.0.0"
+ipykernel = "^6.22.0"
+pytest = "^7.3.0"
+black = "^23.3.0"
+flake8 = "^6.0.0"
+ipython = "^8.0.0"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 100
+target-version = ['py311']
+
+[tool.flake8]
+max-line-length = 100
+extend-ignore = ["E203", "W503"]
+
+[tool.poetry.scripts]
+train = "scripts.train:main"

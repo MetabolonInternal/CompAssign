@@ -1,0 +1,19 @@
+name: compassign-rt
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pymc=5.26.1
+  - pytensor>=2.35
+  - openblas
+  - numpy=2.3.5
+  - scipy>=1.16
+  - pandas
+  - pyarrow
+  - arviz
+  - scikit-learn>=1.7,<1.8
+  - jax=0.7.*
+  - jaxlib=0.7.*
+  - numpyro
+  - blackjax
+  - pip

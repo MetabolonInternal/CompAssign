@@ -1,0 +1,73 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+*.ipynb
+
+# Environment
+.env
+.venv
+.venv-chem/
+env/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Data and outputs (keep structure but not large files)
+*.log
+*.nc
+*.netcdf
+*.h5
+*.hdf5
+resources/metabolites/embeddings_chemberta_pca20.parquet
+poetry.lock.bak
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+analyze_precision_simple.py
+run_enhanced_simple.py
+
+# LaTeX build artefacts
+*.aux
+*.out
+*.fdb_latexmk
+*.fls
+*.toc
+*.xdv
+
+# Keep output structure but not all data
+output/models/*
+!output/models/.gitkeep
+output/results/*.json
+!output/results/.gitkeep
+output
+
+# Generated visualizations and validation outputs
+plots/
+validation_results.json
+validation_results.json.backup.*
+validation_output.log
+
+# Local data and external checkouts
+data/
+external_repos/
+
+# Keep documentation artifacts (some environments globally ignore directories named "results")
+!docs/models/results/
+!docs/models/results/**/*

@@ -1,0 +1,400 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{bm}
+\usepackage{hyperref}
+\usepackage{float}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{subcaption}
+\usepackage{verbatim}
+\usepackage{longtable}
+\usepackage{fontspec}
+
+\setmainfont{Times New Roman}
+\setmonofont{Menlo}
+
+\graphicspath{{./}{images/}{images/rt_pymc_multilevel_pooling_report/}{docs/models/}{docs/models/images/}{docs/models/images/rt_pymc_multilevel_pooling_report/}}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.7\baselineskip}
+
+\title{Report: RT Regression Model Selection (Ridge Pooling vs Hierarchical Ridge vs Lasso Baselines)}
+\author{Bioinformatics Team}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{Executive summary}
+
+We evaluate model \textbf{form} (not feature engineering) for RT regression, focusing on:
+\begin{itemize}
+  \item \textbf{Accuracy}: global RMSE/MAE on realtest.
+  \item \textbf{Uncertainty quality}: empirical coverage of nominal 95\% prediction intervals and their average width.
+  \item \textbf{Practicality}: training time and ability to support cold-start predictions.
+\end{itemize}
+
+We compare two ridge-style model forms (and two lasso baselines) for lib208 and lib209 under
+\textbf{cap100 training} and \textbf{realtest evaluation}:
+\begin{itemize}
+  \item \textbf{Ridge (supercategory, PyMC)}: a fast collapsed ridge model fit per \texttt{species\_cluster}.
+  \item \textbf{Ridge (supercategory, sklearn)}: a per-group ridge baseline that writes coefficient summaries and
+  an approximate predictive distribution.
+  \item \textbf{Ridge (partial pooling)}: a hierarchical ridge model fit per \texttt{species} with priors pooled
+  through \texttt{species\_cluster}.
+  \item \textbf{Lasso (supercategory)} and \textbf{Lasso (species)} baselines from Sally's legacy model bundles.
+\end{itemize}
+
+\textbf{Key result:} \textbf{Ridge (partial pooling)} improves RMSE and yields much tighter prediction intervals
+with coverage close to nominal (0.95), but costs \textbf{hours of training time} (ADVI).
+\textbf{Ridge (supercategory, PyMC)} is essentially instantaneous and safe, but is \textbf{over-conservative}
+(coverage $\sim$0.99) and produces much wider windows.
+\textbf{Ridge (supercategory, sklearn)} matches the same RMSE (ridge-equivalent point predictions) but produces
+\textbf{much narrower windows that under-cover} (coverage $\sim$0.92--0.94), which would systematically exclude
+true peaks in downstream peak assignment.
+
+\textbf{Recommendation:} Use \textbf{Ridge (partial pooling)} as the primary model form when we can afford offline
+training (e.g., periodic retrains), and keep \textbf{Ridge (supercategory, PyMC)} as a fast fallback / debugging baseline.
+
+\section{Introduction}
+
+Downstream peak assignment benefits from RT predictions that are both accurate and accompanied by
+well-calibrated uncertainty (for candidate windowing). At the same time, we require a model form that:
+\begin{itemize}
+  \item generalizes to \textbf{new species not present in training} (cold-start), and
+  \item remains stable in the \textbf{long tail} of sparse compound/group history.
+\end{itemize}
+
+This report summarizes our current cap100 $\rightarrow$ realtest experiments, compares ridge pooling variants to
+two lasso baselines, and provides a recommendation on model form.
+
+\section{Methods}
+
+\subsection{Data and group definitions}
+
+The production RT CSVs contain rows of curated RT observations with run-level covariates
+(\texttt{IS*}/\texttt{RS*}/\texttt{ES\_\*}), and identifiers including:
+\begin{itemize}
+  \item \texttt{species\_cluster}: supercategory identifier (matrix/supercategory),
+  \item \texttt{species}: subgroup identifier nested under \texttt{species\_cluster},
+  \item \texttt{comp\_id}: compound id.
+\end{itemize}
+
+The stage-1 artifact stores coefficient summaries per group
+\[
+g = (\texttt{group\_id}, \texttt{comp\_id}),
+\]
+where \texttt{group\_id} is derived from a configured \texttt{group\_col}. In this work:
+\begin{itemize}
+  \item \texttt{group\_col=species\_cluster} (supercategory ridge),
+  \item \texttt{group\_col=species} (hierarchical ridge; nested within supercategory).
+\end{itemize}
+
+\subsection{Feature set}
+
+Let $\bm{x}_i$ be the vector of run-level covariates for test row $i$. For pooling comparisons in this report we
+use \textbf{linear anchors only} (no poly2) to avoid confounding ``pooling effect'' with ``feature expansion effect''.
+
+\subsection{Models}
+
+All models are linear-in-features at prediction time and differ in grouping and pooling structure.
+
+\subsubsection{Ridge (supercategory, PyMC): collapsed per-\texttt{species\_cluster} ridge}
+
+For each group $g$ (here: $(\texttt{species\_cluster}, \texttt{comp\_id})$) we model RT:
+\[
+  y_{gi} = b_g + \bm{x}_{gi}^\top \bm{w}_g + \epsilon_{gi}, \quad \epsilon_{gi} \sim \mathcal{N}(0, \sigma_g^2).
+\]
+With a Gaussian ridge prior $\bm{w}_g \sim \mathcal{N}(\bm{0}, \tau_w^2 \bm{I})$, the posterior mean matches standard
+ridge regression and the posterior covariance is available in closed form. This model trains extremely quickly.
+
+\subsubsection{Ridge (supercategory, sklearn): per-group ridge coefficient summaries}
+
+This baseline trains an independent ridge regression for each group
+$g=(\texttt{species\_cluster}, \texttt{comp\_id})$ using the same linear run covariates. It writes a production-friendly
+artifact of per-group coefficient posterior summaries (\texttt{beta\_hat}, \texttt{beta\_cov}, \texttt{sigma2\_mean})
+and uses a Normal approximation to produce per-row prediction intervals. When we match the ridge penalty $\lambda$ to the
+PyMC collapsed ridge and use the same evaluation code, the \emph{point predictions} match up to numerical precision, but the
+\emph{interval widths and coverage} can differ substantially.
+
+\subsubsection{Ridge (partial pooling): hierarchical priors for \texttt{species} within \texttt{species\_cluster}}
+
+The partial pooling model keeps the subgroup grouping (\texttt{species}) but introduces hierarchical pooling for:
+\begin{itemize}
+  \item \textbf{intercepts} with compound-aware structure, and
+  \item \textbf{slope prior means} (``slope heads'') with supercategory shrinkage.
+\end{itemize}
+
+\paragraph{Intercept prior (\texttt{intercept\_prior=comp\_hier\_supercat}).}
+For each subgroup $c$ with parent supercategory $s(c)$ and each compound $k$:
+\[
+  b_{(c,k)} \sim \mathcal{N}\left(t_0 + \mu_c + \alpha_k, \tau_b\right),
+\]
+with
+\[
+  \mu_c \sim \mathcal{N}\left(\mu_{s(c)}, \tau_{\mu,s(c)}\right), \quad
+  \mu_s \sim \mathcal{N}(0, \tau_{\mu,\mathrm{supercat}}),
+  \quad
+  \alpha_k \sim \mathcal{N}(0, \tau_{\mathrm{comp}}).
+\]
+
+\paragraph{Slope head (\texttt{slope\_head\_mode=cluster\_supercat}).}
+We learn a slope mean for each subgroup $\bm{m}_c \in \mathbb{R}^p$ and use it as the prior mean for group slopes
+$\bm{w}_{(c,k)}$. We pool slope heads through the supercategory:
+\[
+  \bm{m}_c \sim \mathcal{N}\left(\bm{m}_{s(c)}, \tau_{w,s(c)}\right), \quad
+  \bm{m}_s \sim \mathcal{N}\left(\bm{m}_0, \tau_{w,\mathrm{supercat}}\right).
+\]
+
+\paragraph{Inference.}
+We use ADVI for scalability. The exported coefficient summaries incorporate learned prior means so pooling shifts
+mean predictions as intended.
+
+\subsubsection{Lasso baselines}
+
+We include two legacy eslasso baselines for context:
+\begin{itemize}
+  \item \textbf{Lasso (supercategory)}: one lasso per \texttt{species\_cluster}.
+  \item \textbf{Lasso (species)}: a smaller set of per-matrix models (``local models'') selected from a
+  \texttt{species\_raw} mapping; this baseline does \textbf{not} score all rows.
+\end{itemize}
+Lasso ``intervals'' are window-based (\texttt{pred} $\pm$ \texttt{window}) rather than derived from a probabilistic
+predictive distribution. We still report their empirical ``coverage95'' for comparison, but it should not be
+interpreted as nominal calibration in the same way as ridge models.
+
+\subsection{Evaluation metrics}
+
+Let $y_i$ be observed RT and $\hat{y}_i$ be the point prediction on realtest (units: minutes).
+\begin{itemize}
+  \item \textbf{RMSE}: $\sqrt{\frac{1}{n}\sum_i (\hat{y}_i - y_i)^2}$.
+  \item \textbf{MAE}: $\frac{1}{n}\sum_i |\hat{y}_i - y_i|$.
+  \item \textbf{Coverage@95\%} (ridge models): with predicted standard deviation
+  $\hat{\sigma}_i = \sqrt{\sigma^2_g + \bm{x}_i^\top \widehat{\mathrm{Cov}}(\bm{\beta}_g)\bm{x}_i}$, we define the
+  nominal 95\% interval as $\hat{y}_i \pm 1.96\,\hat{\sigma}_i$ and compute the fraction of test points inside.
+  \item \textbf{Mean interval width} (ridge models): $\frac{1}{n}\sum_i 2\cdot 1.96\cdot \hat{\sigma}_i$.
+  \item \textbf{Coverage@95\% / width (lasso)}: computed using the legacy window:
+  $|\hat{y}_i - y_i| \le w_i$ with width $2w_i$.
+\end{itemize}
+
+We stratify by \textbf{training support bin} of each $(\texttt{group\_id}, \texttt{comp\_id})$ group using bins:
+\[
+\{\le 1,\; 2,\; 3\text{--}5,\; 6\text{--}10,\; 11\text{--}20,\; 21\text{--}50,\; 51\text{--}100,\; >100\}.
+\]
+
+\subsection{Reproducibility}
+
+Ridge experiments were generated by:
+\begin{verbatim}
+./scripts/run_rt_prod.sh --cap 100 --libs 208,209
+./scripts/run_rt_prod_eval.sh --cap 100 --libs 208,209
+\end{verbatim}
+and plots/tables in this report were regenerated by:
+\begin{verbatim}
+./scripts/plot_rt_multilevel.sh --cap 100 --libs 208,209
+\end{verbatim}
+using the run directory pointer in \texttt{output/rt\_prod\_latest.txt}.
+
+\section{Results}
+
+\subsection{Global performance}
+
+Table~\ref{tab:global_metrics} summarizes global metrics on realtest for lib208 and lib209. Lasso baselines do not
+score all rows; \textbf{Rows scored} reflects applicability.
+
+\begin{table}[H]
+\centering
+\caption{Global realtest metrics for cap100-trained models (linear features).}
+\label{tab:global_metrics}
+\begin{tabular}{llrrrrrr}
+\toprule
+Lib & Model & RMSE & MAE & Cov95 & Width95 & Rows scored & Train (min) \\
+\midrule
+208 & Ridge (supercategory, PyMC) & 0.009023 & 0.004673 & 0.987 & 0.068109 & 100.0\% & 0.0 \\
+208 & Ridge (supercategory, sklearn) & 0.009023 & 0.004673 & 0.943 & 0.023534 & 100.0\% & 0.0 \\
+208 & Ridge (partial pooling) & 0.007877 & 0.003827 & 0.956 & 0.027978 & 100.0\% & 465.0 \\
+208 & Lasso (supercategory) & 0.015081 & 0.007956 & 0.954 & 0.058908 & 94.7\% & -- \\
+208 & Lasso (species) & 0.011425 & 0.006510 & 0.994 & 0.068647 & 51.2\% & -- \\
+\midrule
+209 & Ridge (supercategory, PyMC) & 0.008317 & 0.004677 & 0.993 & 0.070829 & 100.0\% & 0.1 \\
+209 & Ridge (supercategory, sklearn) & 0.008317 & 0.004677 & 0.920 & 0.021393 & 100.0\% & 0.0 \\
+209 & Ridge (partial pooling) & 0.007718 & 0.004298 & 0.956 & 0.027551 & 100.0\% & 860.9 \\
+209 & Lasso (supercategory) & 0.009439 & 0.004954 & 0.993 & 0.050886 & 97.8\% & -- \\
+209 & Lasso (species) & 0.007741 & 0.004346 & 0.998 & 0.055400 & 82.7\% & -- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Interpretation.}
+Relative to Ridge (supercategory, PyMC), Ridge (partial pooling) reduces RMSE by 0.00115 min (0.069 s) on lib208 and
+0.00060 min (0.036 s) on lib209. It also shrinks average 95\% interval width by about 0.040--0.043 min
+(2.4--2.6 s) and moves coverage closer to the nominal 0.95 target.
+The sklearn supercategory ridge matches the same RMSE (ridge-equivalent means) but substantially under-covers, which is
+undesirable when the prediction interval is used as an RT filter in peak assignment.
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}[b]{0.49\linewidth}
+\includegraphics[width=\linewidth]{lib208_global_comparison_anchor_none_full.png}
+\caption{lib208}
+\end{subfigure}
+\begin{subfigure}[b]{0.49\linewidth}
+\includegraphics[width=\linewidth]{lib209_global_comparison_anchor_none_full.png}
+\caption{lib209}
+\end{subfigure}
+\caption{Global comparison across models (cap100 training, realtest evaluation). Panels show RMSE, coverage@95\%,
+mean interval width, and training time.}
+\label{fig:global_comparison}
+\end{figure}
+
+\subsection{Comparison vs sklearn ridge baseline}
+
+The sklearn baseline and the PyMC supercategory model are both ridge regression models over the same run covariates.
+When we fix the ridge penalty $\lambda$ to the same value in both implementations, their posterior means (and therefore
+their point predictions) match up to numerical precision. This is expected: with a Gaussian ridge prior on slopes and a
+flat intercept prior, the posterior mean equals the ridge solution.
+
+However, the \textbf{prediction intervals} differ because they depend on how we estimate (and propagate) predictive
+variance. In particular, the sklearn coefficient-summary artifact estimates a separate noise scale (\texttt{sigma2\_mean})
+for each $(\texttt{species\_cluster}, \texttt{comp\_id})$ group, which can lead to \textbf{overly optimistic}
+intervals in practice. Empirically this shows up as substantially \textbf{narrower windows} but \textbf{lower-than-nominal}
+coverage (0.92--0.94). In a peak-assignment setting where we use the interval as a hard RT gate, this under-coverage
+translates directly into a higher \emph{miss rate}: the true peak is excluded from consideration more often.
+
+Figure~\ref{fig:sklearn_candidates_global} shows the three candidate ridge variants (PyMC supercategory, sklearn supercategory,
+and PyMC partial pooling). Figure~\ref{fig:sklearn_candidates_support} shows the same comparison stratified by training support.
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}[b]{0.49\linewidth}
+\includegraphics[width=\linewidth]{lib208_global_comparison_anchor_none_candidates.png}
+\caption{lib208}
+\end{subfigure}
+\begin{subfigure}[b]{0.49\linewidth}
+\includegraphics[width=\linewidth]{lib209_global_comparison_anchor_none_candidates.png}
+\caption{lib209}
+\end{subfigure}
+\caption{Global comparison of ridge candidates only. The sklearn supercategory model achieves narrower windows by
+under-covering (coverage below 0.95). The PyMC supercategory model over-covers with wider windows. PyMC partial pooling
+is closest to the desired operating point: narrow windows with near-nominal coverage.}
+\label{fig:sklearn_candidates_global}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}[b]{0.49\linewidth}
+\includegraphics[width=\linewidth]{lib208_by_support_bin_anchor_none_candidates.png}
+\caption{lib208}
+\end{subfigure}
+\begin{subfigure}[b]{0.49\linewidth}
+\includegraphics[width=\linewidth]{lib209_by_support_bin_anchor_none_candidates.png}
+\caption{lib209}
+\end{subfigure}
+\caption{Ridge candidate comparison by training support bin. The same pattern holds across the long tail: sklearn tends
+to be narrower but under-calibrated; PyMC partial pooling tightens intervals while maintaining near-nominal coverage.}
+\label{fig:sklearn_candidates_support}
+\end{figure}
+
+\subsection{Performance by training support bin}
+
+Figure~\ref{fig:support_bin} breaks metrics down by training support bin (long tail to head).
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}[b]{0.49\linewidth}
+\includegraphics[width=\linewidth]{lib208_by_support_bin_anchor_none_full.png}
+\caption{lib208}
+\end{subfigure}
+\begin{subfigure}[b]{0.49\linewidth}
+\includegraphics[width=\linewidth]{lib209_by_support_bin_anchor_none_full.png}
+\caption{lib209}
+\end{subfigure}
+\caption{Metrics by training support bin for each model. Coverage@95\% is empirical coverage of the nominal 95\%
+prediction interval (ridge models) or window interval (lasso baselines).}
+\label{fig:support_bin}
+\end{figure}
+
+\subsection{Performance by species\_cluster}
+
+Figure~\ref{fig:by_cluster} aggregates metrics by \texttt{species\_cluster}.
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}[b]{0.49\linewidth}
+\includegraphics[width=\linewidth]{lib208_by_species_cluster_anchor_none_full.png}
+\caption{lib208}
+\end{subfigure}
+\begin{subfigure}[b]{0.49\linewidth}
+\includegraphics[width=\linewidth]{lib209_by_species_cluster_anchor_none_full.png}
+\caption{lib209}
+\end{subfigure}
+\caption{Metrics by \texttt{species\_cluster} (supercategory). These aggregates reflect within-supercategory
+performance stability and highlight where models under/over-estimate uncertainty.}
+\label{fig:by_cluster}
+\end{figure}
+
+\section{Discussion}
+
+\paragraph{Accuracy vs uncertainty for peak assignment.}
+For downstream peak assignment, tighter uncertainty windows (with maintained calibration) directly reduce the set
+of candidate peaks per compound, improving precision. Ridge (partial pooling) produces substantially narrower
+intervals while keeping coverage close to nominal; Ridge (supercategory, PyMC) is consistently over-conservative with
+much wider windows.
+
+\paragraph{Why we do not prefer sklearn intervals (as-is).}
+The sklearn ridge baseline produces very narrow intervals, but empirically under-covers the nominal 95\% target.
+In a peak assignment pipeline that uses RT intervals as a hard filter, under-coverage becomes a direct failure mode:
+the true peak is excluded more often. The PyMC partial pooling model achieves a better operating point: narrow windows
+with coverage close to nominal, so it reduces candidate load without sacrificing recall.
+
+\paragraph{Cost of hierarchy.}
+The benefit of partial pooling comes at a large training cost: $\sim$7.8 hours (lib208) and $\sim$14.3 hours
+(lib209) in these experiments. If we retrain infrequently (e.g., periodic offline retrains), this may be acceptable;
+if we need rapid iteration, Ridge (supercategory, PyMC) remains valuable.
+
+\paragraph{Cold-start behaviour.}
+Both ridge forms can provide predictions for new species as long as the row can be assigned to an existing
+\texttt{species\_cluster}. The hierarchical model additionally defines a principled prior over unseen \texttt{species}
+within a supercategory, but production usage would require explicitly sampling or constructing coefficients for
+unseen groups (future work).
+
+\paragraph{Lasso baselines.}
+Lasso (supercategory) is generally weaker in RMSE than ridge candidates. Lasso (species) can look competitive on
+lib209 but scores only a subset of rows (and therefore requires a fallback model). Its interval is a fixed window,
+so coverage should be interpreted as ``fraction inside the window'' rather than probabilistic calibration.
+
+\section{Conclusion and recommendation}
+
+Based on current cap100 $\rightarrow$ realtest results, \textbf{Ridge (partial pooling)} is the best overall model
+form for peak assignment: it improves RMSE and substantially tightens predictive windows with near-nominal
+coverage. The main downside is training time (hours).
+
+We recommend:
+\begin{itemize}
+  \item \textbf{Primary}: Ridge (partial pooling) for production-quality coefficients and calibrated intervals.
+  \item \textbf{Fallback / fast iteration}: Ridge (supercategory, PyMC) as a fast, stable baseline and safety net.
+  \item \textbf{sklearn ridge}: useful as a fast baseline and for debugging; avoid using its intervals for gating
+  unless we explicitly calibrate them to hit nominal coverage.
+\end{itemize}
+
+\section{Future extensions}
+
+\begin{itemize}
+  \item \textbf{Peak-assignment integration:} use the predictive distribution as a likelihood term (not only a hard gate)
+  and tune operating points explicitly in terms of candidate count vs miss rate.
+  \item \textbf{Calibration as a first-class step:} fit a small global (or per-supercategory) predictive-scale calibration
+  on a held-out validation set to hit nominal coverage while minimizing window width.
+  \item \textbf{Active learning loop closure:} choose which species/compounds to curate next based on assignment ambiguity
+  (high candidate count), long-tail support, and calibration failures; retrain periodically and measure end-to-end impact.
+  \item \textbf{Instrument transfer:} add an explicit transfer layer (e.g., per-instrument offset/scale, or hierarchical
+  run-drift components) so new instruments can adapt using limited anchor data without losing calibration.
+  \item \textbf{Cold-start matrices and unseen chemicals:} extend intercept priors to chemistry-informed backoff (e.g.,
+  embedding or class-conditioned priors) so we can produce sensible means and honest uncertainty for unseen compounds and/or
+  new matrices.
+  \item \textbf{Training speed and operational simplicity:} reduce ADVI wall time (structured VI, fewer parameters, better
+  initialization) and provide clean production scripts with sensible hardcoded defaults for reproducibility.
+\end{itemize}
+
+\end{document}
