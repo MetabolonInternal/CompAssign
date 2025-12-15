@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 import scripts.assess_active_learning as assess
-from src.compassign.run_metadata import RunMetadata
+from src.compassign.utils import RunMetadata
 
 
 def test_assess_active_learning_summary_includes_random_section(

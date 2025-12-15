@@ -157,7 +157,7 @@ echo -e "${CYAN}Running active learning assessment${NC}"
 echo -e "${YELLOW}Command:${NC} PYTHONPATH=. ${CMD[*]}"
 PYTHONPATH=. "${CMD[@]}"
 
-PLOT_CMD=("python" "-m" "src.compassign.analysis.al_plots" "--results-dir" "${OUTPUT_DIR}/results")
+  PLOT_CMD=("python" "-m" "src.compassign.active_learning.plots" "--results-dir" "${OUTPUT_DIR}/results")
 PYTHONPATH=. "${PLOT_CMD[@]}"
 
 echo -e "\n${GREEN}✅ Active learning assessment complete${NC}"

@@ -2,7 +2,7 @@
 
 This document describes how to turn Pachyderm exports plus library metadata into
 compact, chemistry‑aware RT training inputs that are compatible with
-`scripts/pipelines/train_rt_prod.py`.
+the production ridge RT pipeline (`./scripts/run_rt_prod.sh`).
 
 The workflow is modular and reproducible; each step is a small script under
 `scripts/pipelines` or `scripts/data_prep`.
@@ -204,10 +204,9 @@ Row counts after this step (cap 5, example):
 
 ---
 
-### 7. Build RT production CSVs (train_rt_prod inputs)
+### 7. Build RT production CSVs (RT ridge inputs)
 
-The production RT loader (`scripts/pipelines/train_rt_prod.py`) expects a CSV
-with:
+The production RT ridge trainers (driven by `./scripts/run_rt_prod.sh`) expect a CSV with:
 
 - `sampleset_id, worksheet_id, task_id`
 - `species, species_cluster`
@@ -264,16 +263,14 @@ Approximate sizes:
 - lib 400 cap5: ~30k rows, ~8.9 MB
 - lib 402 cap5: ~20k rows, ~5.4 MB
 
-These CSVs are ready for `train_rt_prod.py`, e.g.:
+These CSVs are ready for the production ridge training wrapper, e.g.:
 
 ```bash
-PYTHONPATH=. python scripts/pipelines/train_rt_prod.py \
-  --data-csv repo_export/..._lib209_cap5_chemclass_rt_prod.csv \
-  --quick
+./scripts/run_rt_prod.sh --libs 209 --cap 100 --quick
+./scripts/run_rt_prod_eval.sh --libs 209 --cap 100
 ```
 
-The `--quick` flag uses smaller sampler settings for faster iteration. In
-production we recommend running the full settings without `--quick`.
+The `--quick` flag reduces ADVI steps for a smoke run.
 
 ---
 
@@ -283,7 +280,7 @@ Per lib, we end up with:
 
 - cap‑sampled, chemistry‑aware Parquet:
   - `repo_export/merged_training_*_lib<lib>_cap5_chemclass.parquet`
-- RT production CSV for `train_rt_prod`:
+- RT production CSV for the ridge trainers:
   - `repo_export/merged_training_*_lib<lib>_cap5_chemclass_rt_prod.csv`
 
 These preserve:
@@ -292,11 +289,6 @@ These preserve:
   - a lib comp→chem mapping, and
   - a ChemBERTa embedding + compound_class
 
-At training time, `train_rt_prod.py`:
-
-- re-joins `comp_id` to the global `chem_id` via the lib mapping,
-- attaches the ChemBERTa PCA‑20 embeddings as `compound_features`, and
-- fits the hierarchical descriptor‑based RT model with class‑pooled γ.
-
-This keeps the training inputs compact while retaining both run‑level
-covariates and chemically informed compound descriptors.
+At training time, `./scripts/run_rt_prod.sh` trains RT ridge models (including a partial pooling
+PyMC model) directly from these CSVs and writes stage‑1 coefficient summaries used downstream
+for evaluation and peak assignment.

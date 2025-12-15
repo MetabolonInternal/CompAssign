@@ -17,22 +17,20 @@ from dataclasses import dataclass, asdict
 # Add parent to path
 sys.path.append(str(Path(__file__).parent.parent))
 
-from src.compassign.peak_assignment import PeakAssignment  # noqa: E402
-from src.compassign.presence_prior import PresencePrior  # noqa: E402
-from src.compassign.multi_candidate_generator import MultiCandidateGenerator  # noqa: E402
-from src.compassign.oracles import (  # noqa: E402
-    OptimalOracle,
-    NoisyOracle,
-    ProbabilisticOracle,
+from src.compassign.assignment import PeakAssignment, PresencePrior  # noqa: E402
+from src.compassign.active_learning.synthetic import MultiCandidateGenerator  # noqa: E402
+from src.compassign.active_learning import (  # noqa: E402
     ConservativeOracle,
+    NoisyOracle,
+    OptimalOracle,
+    ProbabilisticOracle,
     RandomOracle,
     SmartNoisyOracle,
-)
-from src.compassign.eval_loop import run_annotation_experiment, compare_oracles  # noqa: E402
-from src.compassign.active_learning import (  # noqa: E402
-    select_batch,
+    compare_oracles,
     diverse_selection,
     mutual_information,
+    run_annotation_experiment,
+    select_batch,
 )
 
 # This validation uses the multi-candidate generator exclusively.

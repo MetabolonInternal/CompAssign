@@ -18,6 +18,10 @@ tables, this script filters rows so that only rows that will survive downstream
 mapping are sampled. This ensures that any (species_matrix_type, comp_id) pair
 present in the capped output has at least one valid row in the final RT CSV,
 so the set of species×compound pairs does not grow with higher caps.
+
+Note: in our merged Parquets, the column name `species_matrix_type` refers to the
+label used to partition predictor tables in the upstream export (often a supercategory
+identifier), not necessarily a curate SMT phrase.
 """
 
 from __future__ import annotations

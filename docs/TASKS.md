@@ -1,5 +1,111 @@
 # Tasks
 
+## RT Single-Model PyMC (cap100)
+
+### Status (collapsed ridge baseline, 2025-12-14)
+
+- Baselines to compare:
+  - Lasso: `scripts/pipelines/eval_rt_lasso_baseline_by_species_cluster.py`
+  - Ridge (sklearn, per-group): `scripts/pipelines/train_rt_stage1_coeff_summaries.py`
+- Single PyMC model (collapsed Bayesian ridge; *seen groups focus*):
+  - Train: `scripts/pipelines/train_rt_pymc_collapsed_ridge.py`
+  - Output artifact: `models/stage1_coeff_summaries_posterior.npz` (full `beta_cov` + `sigma2_mean` per group)
+- Unified evaluator for any `Stage1CoeffSummaries`:
+  - `scripts/pipelines/eval_rt_coeff_summaries_by_species_cluster.py`
+- Plot compare-by-cluster:
+  - `scripts/pipelines/compare_rt_models_by_cluster.py`
+
+### Headline results (train cap100; eval realtest; seen groups only)
+
+Results are reproduced by the commands in `docs/models/rt_pymc_collapsed_ridge_report.tex` and copied under:
+- `docs/models/results/rt_pymc_collapsed_ridge_report/lib208_realtest/`
+- `docs/models/results/rt_pymc_collapsed_ridge_report/lib209_realtest/`
+
+- lib208 cap100 → realtest:
+  - Ridge (sklearn) RMSE=0.0093, cov95=0.945 (n=966,482)
+  - PyMC collapsed ridge (MAP, `lambda` fixed) RMSE=0.0093, cov95=0.946 (n=966,482)
+  - Lasso (eslasso) RMSE=0.0151, cov95=0.954 (n=915,327; subset with available eslasso model)
+- lib209 cap100 → realtest:
+  - Ridge (sklearn) RMSE=0.0083, cov95=0.935 (n=13,596,681)
+  - PyMC collapsed ridge (MAP, `lambda` fixed) RMSE=0.0083, cov95=0.963 (n=13,596,681)
+  - Lasso (eslasso) RMSE=0.0094, cov95=0.993 (n=13,301,888; subset with available eslasso model)
+
+### Next actions
+
+- Run full cap100 training (no `--max-train-rows`) and evaluate on realtest (seen groups only).
+- Turn on `--lambda-mode learn` (LogNormal prior) and check whether it improves/harms RMSE + coverage.
+- Add hierarchy/pooling incrementally on top of the collapsed likelihood (e.g., cluster/class/chem effects on coefficient means).
+
+## RT Multi-Level Curate + Supercategory (new)
+
+Goal
+
+- Build a single RT model that can behave like:
+  - a curate model (per species/matrix phrase) when data are sufficient, and
+  - a supercategory model (pooled across related phrases) when data are sparse,
+  without hard relabel-and-merge.
+
+Key observation (repo_export)
+
+- The production CSVs in `repo_export/lib{208,209}/cap*/..._rt_prod.csv` include both `species` and `species_cluster`.
+- `repo_export/lib{208,209}/species_mapping/*_species_mapping.csv` clarifies semantics:
+  - `species` is an integer encoding of `species_raw` (intended to be a curate-like subgroup id),
+  - `species_cluster` is an integer encoding of `species_group_raw` (supercategory group).
+- Important: for hierarchical pooling we need `species` to be nested under `species_cluster` (each `species` value belongs to
+  exactly one `species_cluster`). lib209 already satisfies this when `species_raw = species_matrix_type`; lib208 needs a better
+  `species_raw` definition than organism-only labels.
+- Our current `Stage1CoeffSummaries` convention uses `(group_id << 32) + comp_id` keys; historically `group_id` was
+  `species_cluster`.
+
+What we should do (fix mapping semantics)
+
+- Regenerate mappings with `scripts/pipelines/check_rt_metadata_mapping.py`:
+  - lib209: `species_raw = species_matrix_type`, `species_group_raw = group`.
+  - lib208: `species_raw = JCJ_COMBO`, `species_group_raw = group`.
+  - The script enforces nesting (each `species_raw` belongs to exactly one `group`) and drops rows with missing group.
+- For reproducibility, use the end-to-end prep runner:
+  - `bash scripts/pipelines/run_rt_multilevel_data_prep.sh --libs 208,209 --caps 100`
+
+Concrete spec (collapsed ridge; explicit intercept)
+
+- Observations (rows): `rt_i` with run covariates `x_i` (IS/RS/ES + optional poly2 terms).
+- Group for coefficient artifact: `g = (group_id, comp_id)` where `group_id` is defined by `--group-col`, e.g.:
+  - `species_cluster` (supercategory-only; status quo),
+  - `species` (curate-like subgroup nested within supercategory).
+- Likelihood: `rt_i ~ Normal(b_g + x_i·w_g, sigma_y)`.
+- Slopes: `w_g` are *collapsed* analytically with ridge precision `lambda_diag` (same as existing implementation).
+- Intercepts: keep explicit in PyMC so we can add hierarchy, but export as the implied intercept in `Stage1CoeffSummaries`
+  (same export path as existing explicit-intercept models).
+
+Supercategory-aware pooling (intended behavior)
+
+- When `group_id` maps deterministically to `species_cluster` (i.e. `group_col=species` with a nested subgroup mapping),
+  add a supercategory hierarchy for subgroup-level effects:
+  - Subgroup intercept offsets pool within `species_cluster`, with *supercategory-specific shrinkage* so “homogeneous” supercats
+    pool strongly while heterogeneous ones pool weakly.
+  - Optional: do the same for a slope-head (mean drift response) so sparse subgroups borrow a stable drift response.
+
+Planned implementation (this repo)
+
+- Add `--group-col {species_cluster,species}` to training + evaluators and store it in the coefficient artifact so
+  scoring knows how to compute `group_id` from CSV columns.
+- Add supercategory-aware priors for species-level effects (new intercept/slope-head variants) that consume the `species_cluster`
+  parent id when `group_id` has a unique mapping.
+- Keep inference via `--method advi|nuts|map` (NUTS recommended only for small `--max-groups` sanity checks).
+
+Smoke status
+
+- Verified on `lib208/cap5` that `--group-col species --intercept-prior comp_hier_supercat --slope-head-mode cluster_supercat`
+  trains and evaluates end-to-end with ADVI on a small subset (`--max-train-rows/--max-groups`).
+
+Next experiments (tail-first; cap5 → realtest)
+
+- Train three variants (same features/cap; compare tail-by-support):
+  - baseline grouping: `--group-col species_cluster` (status quo),
+  - subgroup grouping only: `--group-col species` (no pooling),
+  - subgroup grouping + pooling: `--group-col species --intercept-mode explicit --intercept-prior comp_hier_supercat --slope-head-mode cluster_supercat`.
+- Evaluate each with `scripts/pipelines/eval_rt_coeff_summaries_by_support.py` on realtest (streaming; start with `--max-test-rows 200000`).
+
 ## Covariate‑Shift: Model Change Discussion
 
 Should we change the model?
@@ -61,9 +167,9 @@ Should we change the model?
 ## Implementation Notes
 
 - Hier model uses species clusters for intercept pooling and chemistry for slope pooling:
-  - Species intercept prior: `src/compassign/rt_hierarchical.py:297`
-  - γ slopes pooled by chemistry: `src/compassign/rt_hierarchical.py:346-355`
-  - Mean assembly (what is intercept vs slope): `src/compassign/rt_hierarchical.py:358-363`
+  - Species intercept prior: `src/compassign/rt/hierarchical.py`
+  - γ slopes pooled by chemistry: `src/compassign/rt/hierarchical.py`
+  - Mean assembly (what is intercept vs slope): `src/compassign/rt/hierarchical.py`
 
 - Covariate shift runner changes:
   - Generator call and fixed‑K retained: `scripts/experiments/rt/covariate_shift/assess_covariate_shift_holdout.py:151-160`

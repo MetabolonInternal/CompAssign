@@ -1,27 +1,56 @@
 #!/usr/bin/env python3
 """
-Validate that every sample_set_id in per-lib merged Parquet has a mapping row
-in the corresponding lib input CSV, and materialize a simple species/species_group
-mapping table for later use.
+Validate RT metadata mappings and materialize a species/species_cluster mapping CSV.
 
-Lib 209:
-  - mapping CSV: data/split_outputs/data/_lib_209_input.csv
-  - species := species_matrix_type
-  - species_group := group
+This is the single source of truth for how we encode `species` and `species_cluster`
+in the RT production CSVs (and thus how we define subgroup/supercategory levels for
+hierarchical modeling and for cap sampling).
 
-Lib 208:
-  - mapping CSV: data/split_outputs/data/_lib_208_input.csv
-  - species := JCJ_SPECIES
-  - species_group := group
+Inputs:
+- Per-lib merged training Parquet: repo_export/merged_training/merged_training_all_lib{lib}.parquet
+- Split input CSVs:
+  - data/split_outputs/data/_lib_208_input.csv
+  - data/split_outputs/data/_lib_209_input.csv
+
+Outputs:
+- repo_export/lib{lib}/species_mapping/<name>.csv with columns:
+    sample_set_id, species_raw, species_group_raw, species, species_cluster
+
+Notes:
+- `species_cluster` should correspond to a "supercategory" (e.g. human blood).
+- `species` should correspond to a curate-like subgroup nested within `species_cluster`.
+  For lib209 this is naturally `species_matrix_type` (e.g. human_plasma).
+  For lib208 the closest nested proxy is `JCJ_COMBO` (species+matrix+type).
 """
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Iterable, Tuple
 
 import pandas as pd
 import pyarrow.parquet as pq
+
+
+def parse_args() -> argparse.Namespace:
+    ap = argparse.ArgumentParser(
+        description="Validate RT mapping inputs and write an encoded species mapping CSV.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    ap.add_argument(
+        "--libs",
+        type=str,
+        default="208,209",
+        help="Comma-separated list of libs to process (e.g. '208,209' or '209').",
+    )
+    ap.add_argument(
+        "--output-name",
+        type=str,
+        default="merged_training_all_lib{lib}_species_mapping.csv",
+        help="Output filename template written under repo_export/lib{lib}/species_mapping/.",
+    )
+    return ap.parse_args()
 
 
 def collect_sample_set_ids(parquet_path: Path) -> pd.Series:
@@ -35,34 +64,44 @@ def collect_sample_set_ids(parquet_path: Path) -> pd.Series:
     return all_ssids
 
 
-def load_mapping(lib_id: int, csv_path: Path) -> pd.DataFrame:
+def _norm_key(name: str) -> str:
+    return str(name).strip().lower().replace(" ", "_")
+
+
+def _find_col(df: pd.DataFrame, key: str) -> str:
+    want = _norm_key(key)
+    for c in df.columns:
+        if _norm_key(c) == want:
+            return c
+    raise KeyError(f"Could not find column '{key}' (normalized='{want}') in CSV columns: {list(df.columns)}")
+
+
+def load_mapping(
+    lib_id: int,
+    csv_path: Path,
+) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
+
+    ssid_col = _find_col(df, "sample_set_id")
+    group_col = _find_col(df, "group")
+
     if lib_id == 209:
-        species_col = "species_matrix_type"
-        group_col = "group"
-        ssid_col = "sample_set_id"
+        # Curate-like subgroup id (nested within supercategory).
+        species_col = _find_col(df, "species_matrix_type")
+        species_raw = df[species_col].astype(str)
     elif lib_id == 208:
-        # Normalize column names for JCJ_SPECIES and sample_set_id
-        # Some headers contain spaces/upper-case; use case-insensitive match.
-        cols_lower = {c.lower(): c for c in df.columns}
-        ssid_col = cols_lower.get("sample_set_id", cols_lower.get("sample_set_id".lower(), "sample_set_id"))
-        # JCJ SPECIES might appear with space; look for 'jcj species' normalized
-        jcj_key = None
-        for c in df.columns:
-            if c.strip().lower().replace(" ", "_") == "jcj_species":
-                jcj_key = c
-                break
-        if jcj_key is None:
-            raise ValueError("Could not find JCJ_SPECIES column in 208 mapping CSV")
-        species_col = jcj_key
-        group_col = "group"
+        # Curate-like subgroup proxy (nested within supercategory).
+        # JCJ_COMBO is effectively (matrix + matrix_type + organism + species) and is nested under `group`.
+        species_col = _find_col(df, "jcj_combo")
+        species_raw = df[species_col].astype(str)
     else:
         raise ValueError(f"Unsupported lib_id {lib_id} for mapping loader")
 
-    mapping = df[[ssid_col, species_col, group_col]].copy()
-    mapping.columns = ["sample_set_id", "species_raw", "species_group_raw"]
+    mapping = df[[ssid_col, group_col]].copy()
+    mapping["species_raw"] = species_raw
+    mapping.rename(columns={ssid_col: "sample_set_id", group_col: "species_group_raw"}, inplace=True)
     mapping["sample_set_id"] = mapping["sample_set_id"].astype(str)
-    return mapping
+    return mapping[["sample_set_id", "species_raw", "species_group_raw"]]
 
 
 def build_encoded_mapping(mapping: pd.DataFrame) -> pd.DataFrame:
@@ -82,21 +121,52 @@ def build_encoded_mapping(mapping: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _require_nested_species_mapping(mapping: pd.DataFrame) -> None:
+    """Ensure each species_raw belongs to exactly one non-null species_group_raw."""
+    df = mapping.dropna(subset=["species_group_raw"]).copy()
+    if df.empty:
+        raise ValueError("Mapping has no rows with a non-null species_group_raw (group).")
+    nunique = df.groupby("species_raw")["species_group_raw"].nunique(dropna=True)
+    bad = nunique[nunique > 1]
+    if not bad.empty:
+        examples = bad.head(10).index.tolist()
+        msg = ["species_raw must map to a single species_group_raw; found violations:"]
+        for s in examples:
+            vals = (
+                df.loc[df["species_raw"] == s, "species_group_raw"]
+                .dropna()
+                .astype(str)
+                .unique()
+                .tolist()
+            )
+            msg.append(f"  - {s!r} -> {vals}")
+        raise ValueError("\n".join(msg))
+
+
 def main() -> None:
+    args = parse_args()
+    libs: list[int] = []
+    for tok in str(args.libs).split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        libs.append(int(tok))
+    if not libs:
+        raise SystemExit("--libs must include at least one lib id")
+
     repo_root = Path(__file__).resolve().parents[2]
     repo_export = repo_root / "repo_export"
     data_root = repo_root / "data" / "split_outputs" / "data"
 
-    configs: Dict[int, Tuple[Path, Path]] = {
-        208: (
-            repo_export / "merged_training_5684639a28c04bc5af7c4fd1a75e62b5_lib208.parquet",
-            data_root / "_lib_208_input.csv",
-        ),
-        209: (
-            repo_export / "merged_training_de194c2cc2114efaa1075ccf7539d0cb_lib209.parquet",
-            data_root / "_lib_209_input.csv",
-        ),
-    }
+    def configs_for(libs_in: Iterable[int]) -> Dict[int, Tuple[Path, Path]]:
+        cfg: Dict[int, Tuple[Path, Path]] = {}
+        for lib_id in libs_in:
+            parquet_path = repo_export / "merged_training" / f"merged_training_all_lib{lib_id}.parquet"
+            csv_path = data_root / f"_lib_{lib_id}_input.csv"
+            cfg[int(lib_id)] = (parquet_path, csv_path)
+        return cfg
+
+    configs = configs_for(libs)
 
     for lib_id, (parquet_path, csv_path) in configs.items():
         print(f"\n[check] lib_id={lib_id}")
@@ -108,25 +178,39 @@ def main() -> None:
             continue
 
         ssids = collect_sample_set_ids(parquet_path)
-        mapping = load_mapping(lib_id, csv_path)
+        mapping_all = load_mapping(lib_id, csv_path)
 
         ssid_set = set(ssids.tolist())
-        map_set = set(mapping["sample_set_id"].tolist())
+        map_all_set = set(mapping_all["sample_set_id"].tolist())
+        missing_in_map = sorted(ssid_set - map_all_set, key=lambda x: int(x))
+        if missing_in_map:
+            raise SystemExit(
+                f"Missing sample_set_id values in mapping input ({len(missing_in_map)}): "
+                f"first 20 -> {missing_in_map[:20]}"
+            )
 
-        missing_in_map = sorted(ssid_set - map_set, key=lambda x: int(x))
+        # Enforce: all encoded rows must have a non-null group.
+        dropped_missing_group = mapping_all["species_group_raw"].isna()
+        n_dropped = int(dropped_missing_group.sum())
+        if n_dropped > 0:
+            print(f"  Dropping {n_dropped} rows with missing group (species_cluster).")
+        mapping = mapping_all.loc[~dropped_missing_group].copy()
+
+        _require_nested_species_mapping(mapping)
+
+        map_set = set(mapping["sample_set_id"].tolist())
         extra_in_map = sorted(map_set - ssid_set, key=lambda x: int(x))
 
         print(f"  sample_set_id in Parquet: {len(ssid_set)}")
-        print(f"  sample_set_id in mapping: {len(map_set)}")
-        if missing_in_map:
-            print(f"  MISSING in mapping ({len(missing_in_map)}): first 20 -> {missing_in_map[:20]}")
-        else:
-            print("  All sample_set_id values have a mapping.")
+        print(f"  sample_set_id in mapping (after drop-missing-group): {len(map_set)}")
         if extra_in_map:
             print(f"  Unused in data ({len(extra_in_map)}): first 20 -> {extra_in_map[:20]}")
 
         encoded = build_encoded_mapping(mapping)
-        out_csv = parquet_path.with_name(parquet_path.stem + "_species_mapping.csv")
+        out_dir = repo_export / f"lib{lib_id}" / "species_mapping"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_name = str(args.output_name).format(lib=lib_id)
+        out_csv = out_dir / out_name
         encoded.to_csv(out_csv, index=False)
         print(f"  Wrote encoded species mapping to {out_csv}")
 

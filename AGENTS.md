@@ -14,7 +14,7 @@
 - Full training: `./scripts/run_training.sh` (omit `--quick` for full settings).
 - Active learning: `./scripts/run_al.sh --quick` (end‑to‑end smoke of AL pipeline).
 - RT model comparison: `./scripts/compare_rt_models.sh --quick` (hierarchical vs baseline).
-- Production loader: `./scripts/run_rt_prod.sh --example --no-fit` (CSV schema; see README).
+- Production RT ridge: `./scripts/run_rt_prod.sh --quick` then `./scripts/run_rt_prod_eval.sh` (cap → realtest + plots).
 - Direct usage/help: `python scripts/train.py --help`.
 - Format: `black src scripts` (configured to line length 100).
 - Lint: `flake8 src scripts`.

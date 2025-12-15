@@ -24,14 +24,14 @@ from typing import Any, Dict, Tuple, List, Optional
 import numpy as np
 import pandas as pd
 
-from src.compassign.ion_transforms import (  # noqa: E402
+from src.compassign.utils import (  # noqa: E402
     ADDUCT_DEFS,
     FRAGMENT_DEFS,
     ISOTOPE_SHIFT,
     ISOTOPE_INTENSITY_FACTOR,
 )
-from src.compassign.datasets import SyntheticDataset  # noqa: E402
-from src.compassign.chem_embeddings import load_chemberta_pca20  # noqa: E402
+from src.compassign.utils import SyntheticDataset  # noqa: E402
+from src.compassign.utils import load_chemberta_pca20  # noqa: E402
 from sklearn.cluster import KMeans  # noqa: E402
 
 # Repo-root anchored embedding artifact path (robust to CWD)

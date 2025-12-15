@@ -43,8 +43,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.compassign.rt_hierarchical import HierarchicalRTModel
-from src.compassign.chem_embeddings import load_chemberta_pca20
+from src.compassign.rt.hierarchical import HierarchicalRTModel
+from src.compassign.utils import load_chemberta_pca20
 
 
 # ----------------------------

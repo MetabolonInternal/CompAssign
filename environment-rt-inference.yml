@@ -5,6 +5,7 @@ dependencies:
   - python=3.11
   - pymc=5.26.1
   - pytensor>=2.35
+  - openblas
   - numpy=2.3.5
   - scipy>=1.16
   - pandas

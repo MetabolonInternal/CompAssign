@@ -27,7 +27,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.pipelines import train_rt_prod as train_mod  # type: ignore
-from src.compassign.rt_hierarchical import HierarchicalRTModel
+from src.compassign.rt.hierarchical import HierarchicalRTModel
 
 
 def parse_args() -> argparse.Namespace:

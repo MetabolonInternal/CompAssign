@@ -7,8 +7,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.compassign.peak_assignment import PeakAssignment
-from src.compassign.presence_prior import PresencePrior
+from src.compassign.assignment import PeakAssignment, PresencePrior
 import arviz as az
 
 

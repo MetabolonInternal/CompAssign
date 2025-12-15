@@ -10,4 +10,4 @@ if [[ " ${ARGS[*]} " != *" --seed "* ]]; then
   ARGS+=("--seed" "42")
 fi
 
-python -m src.utils.rt_model_comparison "${ARGS[@]}"
+python -m src.compassign.rt.model_comparison "${ARGS[@]}"

@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-import src.utils.rt_model_comparison as rtc
+import src.compassign.rt.model_comparison as rtc
 
 
 class _DummyPosterior:

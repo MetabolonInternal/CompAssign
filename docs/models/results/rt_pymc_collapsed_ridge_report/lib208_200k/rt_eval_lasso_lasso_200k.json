@@ -1,0 +1,18 @@
+{
+  "metrics": {
+    "n_obs": 175026,
+    "rmse": 0.011389463605518887,
+    "mae": 0.00551554727987286,
+    "coverage_95": 0.9793287854375922
+  },
+  "n_test_rows_seen": 200000,
+  "n_rows_evaluated": 175026,
+  "chunk_size": 50000,
+  "lib_id": 208,
+  "label": "lasso_200k",
+  "models_root": "/Users/joewandy/Work/MetabolonInternal/CompAssign/external_repos/sally/new_models/eslasso",
+  "species_mapping_csv": "/Users/joewandy/Work/MetabolonInternal/CompAssign/repo_export/lib208/species_mapping/merged_training_5684639a28c04bc5af7c4fd1a75e62b5_lib208_species_mapping.csv",
+  "drop_es": false,
+  "skipped_no_super": 0,
+  "skipped_no_model": 24974
+}

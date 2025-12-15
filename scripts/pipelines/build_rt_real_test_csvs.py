@@ -44,20 +44,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--merged-208",
         type=Path,
-        default=REPO_ROOT / "repo_export" / "shared" / "parquet" / "merged_training_all_lib208.parquet",
+        default=REPO_ROOT / "repo_export" / "merged_training" / "merged_training_all_lib208.parquet",
         help="Merged training Parquet for lib 208",
     )
     parser.add_argument(
         "--merged-209",
         type=Path,
-        default=REPO_ROOT / "repo_export" / "shared" / "parquet" / "merged_training_all_lib209.parquet",
+        default=REPO_ROOT / "repo_export" / "merged_training" / "merged_training_all_lib209.parquet",
         help="Merged training Parquet for lib 209",
     )
     parser.add_argument(
-        "--out-prefix",
+        "--out-root",
         type=Path,
         default=REPO_ROOT / "repo_export",
-        help="Directory prefix for outputs (Parquets and RT CSVs)",
+        help="Output root (writes under repo_export/lib{lib}/realtest/).",
     )
     parser.add_argument(
         "--chem-classes",
@@ -153,28 +153,17 @@ def run_attach_chem_classes(filtered_parq: Path, lib_id: int, chem_classes: Path
 
 
 def run_make_rt_csv(chemclass_parq: Path, lib_id: int, out_csv: Path) -> None:
-    # Reuse existing species mapping for this lib; these are lib-specific and
-    # map sample_set_id -> species, species_cluster, species_group_raw.
-    # We use the mapping from the earlier export (hash 5684639a... and de194c2...)
-    # because the sample_set_id/lib_id definitions are stable across exports.
-    if lib_id == 208:
-        species_mapping = (
-            REPO_ROOT
-            / "repo_export"
-            / "lib208"
-            / "species_mapping"
-            / "merged_training_5684639a28c04bc5af7c4fd1a75e62b5_lib208_species_mapping.csv"
-        )
-    elif lib_id == 209:
-        species_mapping = (
-            REPO_ROOT
-            / "repo_export"
-            / "lib209"
-            / "species_mapping"
-            / "merged_training_de194c2cc2114efaa1075ccf7539d0cb_lib209_species_mapping.csv"
-        )
-    else:
-        raise SystemExit(f"[realtest] No species mapping path configured for lib {lib_id}")
+    # Use the current strict species mapping for this lib.
+    # This ensures consistency with cap dataset generation and multilevel modeling:
+    #   - lib209: species_raw = species_matrix_type, species_group_raw = group
+    #   - lib208: species_raw = JCJ_COMBO,          species_group_raw = group
+    species_mapping = (
+        REPO_ROOT
+        / "repo_export"
+        / f"lib{lib_id}"
+        / "species_mapping"
+        / f"merged_training_all_lib{lib_id}_species_mapping.csv"
+    )
 
     if not species_mapping.exists():
         raise SystemExit(f"Species mapping CSV not found: {species_mapping}")
@@ -205,17 +194,19 @@ def main() -> None:
         raise SystemExit(f"Split CSV must contain columns {sorted(required_cols)}")
 
     # Lib 208
-    real_208_parq = args.out_prefix / "merged_training_realtest_lib208.parquet"
+    out_208_dir = args.out_root / "lib208" / "realtest"
+    real_208_parq = out_208_dir / "merged_training_realtest_lib208.parquet"
     filter_real_test(args.merged_208, split_df, lib_id=208, out_parquet=real_208_parq)
     chemclass_208 = run_attach_chem_classes(real_208_parq, lib_id=208, chem_classes=args.chem_classes)
-    rt_csv_208 = args.out_prefix / "merged_training_realtest_lib208_chemclass_rt_prod.csv"
+    rt_csv_208 = out_208_dir / "merged_training_realtest_lib208_chemclass_rt_prod.csv"
     run_make_rt_csv(chemclass_208, lib_id=208, out_csv=rt_csv_208)
 
     # Lib 209
-    real_209_parq = args.out_prefix / "merged_training_realtest_lib209.parquet"
+    out_209_dir = args.out_root / "lib209" / "realtest"
+    real_209_parq = out_209_dir / "merged_training_realtest_lib209.parquet"
     filter_real_test(args.merged_209, split_df, lib_id=209, out_parquet=real_209_parq)
     chemclass_209 = run_attach_chem_classes(real_209_parq, lib_id=209, chem_classes=args.chem_classes)
-    rt_csv_209 = args.out_prefix / "merged_training_realtest_lib209_chemclass_rt_prod.csv"
+    rt_csv_209 = out_209_dir / "merged_training_realtest_lib209_chemclass_rt_prod.csv"
     run_make_rt_csv(chemclass_209, lib_id=209, out_csv=rt_csv_209)
 
     print("[realtest] Done. RT production CSVs written to:")

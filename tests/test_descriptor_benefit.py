@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 
 from scripts.create_synthetic_data import create_metabolomics_data
-from src.compassign.rt_hierarchical_experimental import HierarchicalRTModel
+from src.compassign.rt.hierarchical import HierarchicalRTModel
 
 
 @pytest.mark.slow

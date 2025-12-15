@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.compassign.rt_hierarchical import HierarchicalRTModel
+from src.compassign.rt.hierarchical import HierarchicalRTModel  # noqa: E402
 
 
 def _small_rt_setup() -> Tuple[HierarchicalRTModel, pd.DataFrame]:
@@ -78,6 +78,19 @@ def test_predictive_std_includes_observation_noise():
 
     assert pred_mean.shape == (2,)
     assert pred_std.shape == (2,)
+
+    # Ensure the posterior-subsampling path runs (historically this raised
+    # UnboundLocalError when traces include `sigma_y_group`).
+    n_draws = int(trace.posterior["mu0"].values.size)
+    pred_mean_sub, pred_std_sub = model.predict_new(
+        species_idx,
+        compound_idx,
+        run_idx=run_idx,
+        run_features=model.run_features,
+        n_samples=n_draws,
+    )
+    assert pred_mean_sub.shape == (2,)
+    assert pred_std_sub.shape == (2,)
 
     if "sigma_y_group" in trace.posterior:
         sigma_y_group = trace.posterior["sigma_y_group"].values.reshape(-1, model.n_clusters)

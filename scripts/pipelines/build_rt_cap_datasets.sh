@@ -21,9 +21,61 @@ set -euo pipefail
 #
 # Usage:
 #   ./scripts/pipelines/build_rt_cap_datasets.sh
+#   ./scripts/pipelines/build_rt_cap_datasets.sh --libs 208,209 --caps 100
+#   ./scripts/pipelines/build_rt_cap_datasets.sh --libs 208 --caps 5,10,100
 
-LIBS=("208" "209")
-CAPS=("5" "10" "20" "50" "100" "200" "500" "1000")
+usage() {
+  cat <<'EOF'
+Usage: build_rt_cap_datasets.sh [--libs 208,209] [--caps 5,10,20,...] [--species-map-208 PATH] [--species-map-209 PATH]
+
+Build capped RT training datasets (Parquet + RT CSV) for one or more libs and caps.
+
+Options:
+  --libs <csv>   Comma-separated lib ids (default: 208,209)
+  --caps <csv>   Comma-separated caps (default: 5,10,20,50,100,200,500,1000)
+  --species-map-208 <path>  Species mapping CSV for lib208 (optional; overrides default path)
+  --species-map-209 <path>  Species mapping CSV for lib209 (optional; overrides default path)
+  -h, --help     Show this help
+EOF
+}
+
+LIBS_CSV="208,209"
+CAPS_CSV="5,10,20,50,100,200,500,1000"
+SPECIES_MAP_208=""
+SPECIES_MAP_209=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --libs)
+      LIBS_CSV="${2:-}"
+      shift 2
+      ;;
+    --caps)
+      CAPS_CSV="${2:-}"
+      shift 2
+      ;;
+    --species-map-208)
+      SPECIES_MAP_208="${2:-}"
+      shift 2
+      ;;
+    --species-map-209)
+      SPECIES_MAP_209="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown arg: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+IFS=',' read -r -a LIBS <<< "${LIBS_CSV}"
+IFS=',' read -r -a CAPS <<< "${CAPS_CSV}"
 
 CHEM_CLASSES="resources/metabolites/chem_classes_k32.parquet"
 if [[ ! -f "$CHEM_CLASSES" ]]; then
@@ -34,7 +86,6 @@ fi
 for lib in "${LIBS[@]}"; do
   input_parq="repo_export/merged_training/merged_training_all_lib${lib}.parquet"
   map_csv="repo_export/lib${lib}/mappings/lib_comp_chem_mapping_lib${lib}.csv"
-  sm_glob=(repo_export/lib${lib}/species_mapping/merged_training_*_lib${lib}_species_mapping.csv)
 
   if [[ ! -f "$input_parq" ]]; then
     echo "Missing input parquet: $input_parq" >&2
@@ -44,11 +95,19 @@ for lib in "${LIBS[@]}"; do
     echo "Missing lib mapping: $map_csv" >&2
     exit 1
   fi
-  if [[ ${#sm_glob[@]} -eq 0 || ! -f "${sm_glob[0]}" ]]; then
-    echo "Missing species mapping CSV under repo_export/lib${lib}/species_mapping/" >&2
+  species_map=""
+  if [[ "${lib}" == "208" && -n "${SPECIES_MAP_208}" ]]; then
+    species_map="${SPECIES_MAP_208}"
+  elif [[ "${lib}" == "209" && -n "${SPECIES_MAP_209}" ]]; then
+    species_map="${SPECIES_MAP_209}"
+  else
+    preferred="repo_export/lib${lib}/species_mapping/merged_training_all_lib${lib}_species_mapping.csv"
+    species_map="${preferred}"
+  fi
+  if [[ ! -f "${species_map}" ]]; then
+    echo "Missing species mapping CSV: ${species_map}" >&2
     exit 1
   fi
-  species_map="${sm_glob[0]}"
 
   for cap in "${CAPS[@]}"; do
     out_dir="repo_export/lib${lib}/cap${cap}"
@@ -57,6 +116,12 @@ for lib in "${LIBS[@]}"; do
     cap_parq="${out_dir}/merged_training_all_lib${lib}_cap${cap}.parquet"
     cap_parq_chem="${out_dir}/merged_training_all_lib${lib}_cap${cap}_chemclass.parquet"
     cap_csv="${out_dir}/merged_training_all_lib${lib}_cap${cap}_chemclass_rt_prod.csv"
+
+    if [[ -f "$cap_csv" ]]; then
+      echo "[lib${lib} cap${cap}] RT CSV exists, skipping: $cap_csv"
+      rm -f "$cap_parq" "$cap_parq_chem"
+      continue
+    fi
 
     if [[ ! -f "$cap_parq" ]]; then
       echo "[lib${lib} cap${cap}] Sampling to $cap_parq"
@@ -83,15 +148,13 @@ for lib in "${LIBS[@]}"; do
       echo "[lib${lib} cap${cap}] Chemclass output exists, skipping: $cap_parq_chem"
     fi
 
-    if [[ ! -f "$cap_csv" ]]; then
-      echo "[lib${lib} cap${cap}] Building RT CSV $cap_csv"
-      python scripts/pipelines/make_rt_prod_csv_from_merged.py \
-        --input "$cap_parq_chem" \
-        --species-mapping "$species_map" \
-        --output "$cap_csv"
-    else
-      echo "[lib${lib} cap${cap}] RT CSV exists, skipping: $cap_csv"
-    fi
+    echo "[lib${lib} cap${cap}] Building RT CSV $cap_csv"
+    python scripts/pipelines/make_rt_prod_csv_from_merged.py \
+      --input "$cap_parq_chem" \
+      --species-mapping "$species_map" \
+      --output "$cap_csv"
+
+    rm -f "$cap_parq" "$cap_parq_chem"
   done
 done
 

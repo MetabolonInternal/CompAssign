@@ -36,9 +36,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.data_prep.create_synthetic_data import create_metabolomics_data  # type: ignore  # noqa: E402
-from src.compassign.datasets import SyntheticDataset  # noqa: E402
-from src.compassign.rt_hierarchical_experimental import HierarchicalRTModel  # noqa: E402
-from src.utils.rt_baseline import (  # noqa: E402
+from src.compassign.utils import SyntheticDataset  # noqa: E402
+from src.compassign.rt.hierarchical import HierarchicalRTModel  # noqa: E402
+from src.compassign.rt.baselines import (  # noqa: E402
     SpeciesCompoundLassoBaseline,
     ClusterCompoundLassoBaseline,
 )

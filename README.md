@@ -40,7 +40,8 @@ This repository provides a small set of shell scripts that orchestrate the main 
 - `scripts/run_training.sh` trains the hierarchical RT model and the current peak assignment skeleton on synthetic data. It accepts a `--quick` flag for smaller, faster runs.
 - `scripts/run_al.sh` runs the active‑learning simulator to exercise the assignment model and the AL loop. It supports a `--quick` smoke profile.
 - `scripts/compare_rt_models.sh` compares the hierarchical RT model against a simple cluster‑wise baseline to sanity‑check the RT component in isolation.
-- `scripts/run_rt_prod.sh` loads a production‑style CSV, validates shapes, and optionally fits the RT model. It supports `--example` to use a bundled CSV and `--no-fit` to skip MCMC.
+- `scripts/run_rt_prod.sh` trains the production RT ridge models (partial pooling + fallbacks) from `repo_export/` RT CSVs; use `--quick` for a smoke run.
+- `scripts/run_rt_prod_eval.sh` evaluates the trained coefficient summaries on `realtest` and regenerates the comparison plots.
 - `scripts/run_validation.sh` executes a small validation suite and produces a brief summary; use it for local smoke checks.
 
 ## License

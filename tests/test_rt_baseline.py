@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from src.utils.rt_baseline import ClusterLassoBaseline
+from src.compassign.rt.baselines import ClusterLassoBaseline
 
 
 def test_cluster_lasso_baseline_respects_clusters() -> None:

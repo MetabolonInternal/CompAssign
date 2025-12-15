@@ -24,9 +24,9 @@ except Exception:  # pragma: no cover - plotting optional in headless envs
     matplotlib = None
     plt = None
 
-from src.compassign.rt_hierarchical_experimental import HierarchicalRTModel
-from src.compassign.peak_assignment import PeakAssignment
-from src.compassign.diagnostic_plots import create_all_diagnostic_plots, create_combined_dashboard
+from src.compassign.assignment import PeakAssignment
+from src.compassign.utils import create_all_diagnostic_plots, create_combined_dashboard
+from src.compassign.rt.hierarchical import HierarchicalRTModel
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:

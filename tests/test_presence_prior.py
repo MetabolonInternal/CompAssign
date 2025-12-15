@@ -8,8 +8,7 @@ import pytest
 # Ensure repository root is importable when running tests directly
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.compassign.peak_assignment import PeakAssignment
-from src.compassign.presence_prior import PresencePrior
+from src.compassign.assignment import PeakAssignment, PresencePrior
 
 
 def test_presence_prior_balances_null_and_positive_updates():

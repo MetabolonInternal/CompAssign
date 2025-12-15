@@ -19,13 +19,10 @@ if str(REPO_ROOT) not in sys.path:
 
 from scripts.data_prep.create_synthetic_data import create_synthetic_dataset  # noqa: E402
 
-from src.compassign.peak_assignment import PeakAssignment, AssignmentResults
-from src.compassign.presence_prior import PresencePrior
-from src.compassign.oracles import OptimalOracle
-from src.compassign.active_learning import ActiveLearner
-from src.compassign.eval_loop import simulate_annotation_round
-from src.compassign.rt_hierarchical import HierarchicalRTModel
-from src.compassign.run_metadata import RunMetadata
+from src.compassign.assignment import AssignmentResults, PeakAssignment, PresencePrior
+from src.compassign.active_learning import ActiveLearner, OptimalOracle, simulate_annotation_round
+from src.compassign.rt.hierarchical import HierarchicalRTModel
+from src.compassign.utils import RunMetadata
 
 RECALL_MATCH_RATIO = 1.0  # Default to matching 100% of the naive full‑review recall
 

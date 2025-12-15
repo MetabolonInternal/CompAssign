@@ -1,0 +1,16 @@
+{
+  "metrics": {
+    "n_obs": 966482,
+    "rmse": 0.009335364735882739,
+    "mae": 0.004847404940464721,
+    "coverage_95": 0.9452881688432894
+  },
+  "n_test": 966482,
+  "n_used": 966482,
+  "chunk_size": 50000,
+  "interval": 0.95,
+  "require_seen_group": false,
+  "skipped_missing_group": 0,
+  "coeff_npz": "/Users/joewandy/Work/MetabolonInternal/CompAssign/output/tmp_stage1_ridge_lib208_cap100/stage1_coeff_summaries.npz",
+  "test_csv": "/Users/joewandy/Work/MetabolonInternal/CompAssign/repo_export/lib208/realtest/merged_training_realtest_lib208_chemclass_rt_prod.csv"
+}

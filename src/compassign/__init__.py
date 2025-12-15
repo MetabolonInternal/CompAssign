@@ -8,11 +8,10 @@ in untargeted metabolomics using hierarchical RT modeling and probabilistic matc
 __version__ = "1.0.0"
 __author__ = "Metabolon CompAssign Team"
 
-from .rt_hierarchical import HierarchicalRTModel
-from .chem_embeddings import load_chemberta_pca20
-from .peak_assignment import PeakAssignment, AssignmentResults
-from .presence_prior import PresencePrior
-from .oracles import (
+from .rt import HierarchicalRTModel
+from .utils import load_chemberta_pca20
+from .assignment import AssignmentResults, PeakAssignment, PresencePrior
+from .active_learning import (
     Oracle,
     OptimalOracle,
     RandomOracle,
@@ -23,7 +22,7 @@ from .oracles import (
     ProbabilisticOracle,
     MixtureOracle,
 )
-from .eval_loop import (
+from .active_learning import (
     simulate_annotation_round,
     run_annotation_experiment,
     compare_oracles,

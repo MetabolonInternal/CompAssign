@@ -21,8 +21,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.data_prep.create_synthetic_data import create_metabolomics_data  # type: ignore
-from src.compassign.datasets import SyntheticDataset
-from src.compassign.rt_hierarchical_experimental import HierarchicalRTModel
+from src.compassign.utils import SyntheticDataset
+from src.compassign.rt.hierarchical import HierarchicalRTModel
 # No cluster inference needed; use generator clusters
 
 

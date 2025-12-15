@@ -4,15 +4,18 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: ./scripts/rsync_compassign.sh [push|pull] [--dry-run]
+Usage: ./scripts/rsync.sh [push|pull] [options]
 
 Sync the CompAssign repo with the remote mirror using rsync.
-On pull, also sync RT production outputs under output/rt_prod.
 
 Arguments:
   push        Copy from local repo to remote.
   pull        Copy from remote to local.
-  --dry-run   Show what would change without modifying files.
+
+Options:
+  --dry-run                 Show what would change without modifying files.
+  -o, --out <name>          Output subdir under output/ to sync (repeatable).
+                            Example: --out rt_pymc_multilevel_cap100_YYYYMMDD_HHMMSS
 
 Environment overrides:
   REMOTE_ROOT   Remote path (default: joewandy@10.34.1.50:~/CompAssign/)
@@ -22,6 +25,7 @@ EOF
 
 ACTION=""
 DRY_RUN=0
+OUTPUT_SUBDIRS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -32,6 +36,15 @@ while [[ $# -gt 0 ]]; do
     --dry-run)
       DRY_RUN=1
       shift
+      ;;
+    -o|--out|--output-subdir)
+      if [[ $# -lt 2 ]]; then
+        echo "$1 requires a value" >&2
+        usage
+        exit 1
+      fi
+      OUTPUT_SUBDIRS+=("$2")
+      shift 2
       ;;
     -h|--help)
       usage
@@ -53,6 +66,26 @@ fi
 LOCAL_ROOT=${LOCAL_ROOT:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"}
 REMOTE_ROOT=${REMOTE_ROOT:-"joewandy@10.34.1.50:~/CompAssign/"}
 
+REMOTE_SPEC="${REMOTE_ROOT%/}"
+REMOTE_HOST=""
+REMOTE_PATH=""
+if [[ "${REMOTE_SPEC}" == *:* ]]; then
+  REMOTE_HOST="${REMOTE_SPEC%%:*}"
+  REMOTE_PATH="${REMOTE_SPEC#*:}"
+fi
+
+remote_dir_exists() {
+  local remote_dir="$1"
+  if [[ -z "${REMOTE_HOST}" ]]; then
+    return 0
+  fi
+  if ! command -v ssh >/dev/null 2>&1; then
+    return 0
+  fi
+  # NB: we intentionally do not quote ${remote_dir} so `~` expands on the remote.
+  ssh -o BatchMode=yes -o ConnectTimeout=5 "${REMOTE_HOST}" "test -d ${remote_dir}" >/dev/null 2>&1
+}
+
 RSYNC_OPTS=(
   -avh
   --update
@@ -72,6 +105,7 @@ fi
 RSYNC_OUTPUT_OPTS=(
   -avh
   --update
+  --exclude '.DS_Store'
 )
 if [[ "$DRY_RUN" -eq 1 ]]; then
   RSYNC_OUTPUT_OPTS+=(--dry-run)
@@ -80,12 +114,43 @@ fi
 if [[ "$ACTION" == "pull" ]]; then
   echo "Pulling from $REMOTE_ROOT to $LOCAL_ROOT"
   rsync "${RSYNC_OPTS[@]}" "$REMOTE_ROOT" "$LOCAL_ROOT/"
-  # Also pull RT production outputs (models/results) for inspection.
-  REMOTE_RT_DIR="${REMOTE_ROOT%/}/output/rt_prod/"
-  LOCAL_RT_DIR="${LOCAL_ROOT%/}/output/rt_prod/"
-  echo "Pulling RT outputs from $REMOTE_RT_DIR to $LOCAL_RT_DIR"
-  rsync "${RSYNC_OUTPUT_OPTS[@]}" "$REMOTE_RT_DIR" "$LOCAL_RT_DIR" || true
+
+  # Pull outputs (default: all of output/).
+  if [[ ${#OUTPUT_SUBDIRS[@]} -gt 0 ]]; then
+    for subdir in "${OUTPUT_SUBDIRS[@]}"; do
+      subdir_norm="${subdir%/}"
+      subdir_norm="${subdir_norm#./output/}"
+      subdir_norm="${subdir_norm#output/}"
+      if [[ -z "${subdir_norm}" ]]; then
+        echo "ERROR: --output-subdir must not be empty" >&2
+        usage
+        exit 1
+      fi
+      REMOTE_OUT_DIR="${REMOTE_ROOT%/}/output/${subdir_norm}/"
+      LOCAL_OUT_DIR="${LOCAL_ROOT%/}/output/${subdir_norm}/"
+      echo "Pulling outputs from $REMOTE_OUT_DIR to $LOCAL_OUT_DIR"
+      if remote_dir_exists "${REMOTE_PATH%/}/output/${subdir_norm}"; then
+        rsync "${RSYNC_OUTPUT_OPTS[@]}" "$REMOTE_OUT_DIR" "$LOCAL_OUT_DIR" || true
+      else
+        echo "Skipping outputs (missing on remote): ${REMOTE_OUT_DIR}"
+      fi
+    done
+  else
+    REMOTE_OUT_DIR="${REMOTE_ROOT%/}/output/"
+    LOCAL_OUT_DIR="${LOCAL_ROOT%/}/output/"
+    echo "Pulling outputs from $REMOTE_OUT_DIR to $LOCAL_OUT_DIR"
+    if remote_dir_exists "${REMOTE_PATH%/}/output"; then
+      rsync "${RSYNC_OUTPUT_OPTS[@]}" "$REMOTE_OUT_DIR" "$LOCAL_OUT_DIR" || true
+    else
+      echo "Skipping outputs (missing on remote): ${REMOTE_OUT_DIR}"
+    fi
+  fi
 else
+  if [[ ${#OUTPUT_SUBDIRS[@]} -gt 0 ]]; then
+    echo "ERROR: -o/--out is only supported for pull" >&2
+    usage
+    exit 1
+  fi
   echo "Pushing from $LOCAL_ROOT to $REMOTE_ROOT"
   rsync "${RSYNC_OPTS[@]}" "$LOCAL_ROOT/" "$REMOTE_ROOT"
 fi

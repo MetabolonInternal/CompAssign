@@ -42,6 +42,18 @@ def parse_args() -> argparse.Namespace:
         help="Label for the dataset (e.g., cap10, realtest) used in the plot title and filename.",
     )
     parser.add_argument(
+        "--hier-label",
+        type=str,
+        default="Hierarchical",
+        help="Legend/title label for the hier-csv series.",
+    )
+    parser.add_argument(
+        "--lasso-label",
+        type=str,
+        default="Lasso",
+        help="Legend/title label for the lasso-csv series.",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=None,
@@ -91,8 +103,6 @@ def main() -> None:
     except Exception:
         raise SystemExit("matplotlib is required for plotting but could not be imported")
 
-    coverage_plot_written = False
-
     if hier_df is not None and lasso_df is not None:
         # Side-by-side RMSE comparison
         merged = hier_df[["species_group_raw", "rmse"]].merge(
@@ -102,7 +112,9 @@ def main() -> None:
             suffixes=("_hier", "_lasso"),
         )
         if merged.empty:
-            raise SystemExit("No overlapping species groups between hierarchical and lasso metrics.")
+            raise SystemExit(
+                "No overlapping species groups between hierarchical and lasso metrics."
+            )
 
         merged = merged.sort_values("rmse_hier")
 
@@ -114,7 +126,7 @@ def main() -> None:
             x - width / 2,
             merged["rmse_hier"],
             width,
-            label="Hierarchical",
+            label=args.hier_label,
             color="tab:blue",
             alpha=0.8,
         )
@@ -122,7 +134,7 @@ def main() -> None:
             x + width / 2,
             merged["rmse_lasso"],
             width,
-            label="Lasso",
+            label=args.lasso_label,
             color="tab:orange",
             alpha=0.8,
         )
@@ -134,7 +146,9 @@ def main() -> None:
         )
         plt.ylabel("RMSE (min)")
         plt.xlabel("Species group")
-        plt.title(f"RT RMSE by species group ({args.label}): Hierarchical vs Lasso")
+        plt.title(
+            f"RT RMSE by species group ({args.label}): {args.hier_label} vs {args.lasso_label}"
+        )
         plt.tight_layout()
         plt.legend()
         plt.savefig(out_path, dpi=200)
@@ -156,12 +170,8 @@ def main() -> None:
             "n_compounds_total",
             "n_compounds_modeled",
         }.issubset(lasso_df.columns):
-            cov = hier_df[
-                ["species_group_raw", "n_compounds_total", "n_compounds_modeled"]
-            ].merge(
-                lasso_df[
-                    ["species_group_raw", "n_compounds_total", "n_compounds_modeled"]
-                ],
+            cov = hier_df[["species_group_raw", "n_compounds_total", "n_compounds_modeled"]].merge(
+                lasso_df[["species_group_raw", "n_compounds_total", "n_compounds_modeled"]],
                 on="species_group_raw",
                 how="inner",
                 suffixes=("_hier", "_lasso"),
@@ -190,7 +200,7 @@ def main() -> None:
                 x_cov - width_cov / 2,
                 cov["compound_coverage_hier"],
                 width_cov,
-                label="Hierarchical",
+                label=args.hier_label,
                 color="tab:blue",
                 alpha=0.8,
             )
@@ -198,7 +208,7 @@ def main() -> None:
                 x_cov + width_cov / 2,
                 cov["compound_coverage_lasso"],
                 width_cov,
-                label="Lasso",
+                label=args.lasso_label,
                 color="tab:orange",
                 alpha=0.8,
             )
@@ -213,11 +223,9 @@ def main() -> None:
             plt.ylim(0.0, 1.05)
             plt.title(
                 f"RT compound coverage by species group ({args.label}): "
-                "Hierarchical vs Lasso"
+                f"{args.hier_label} vs {args.lasso_label}"
             )
-            cov_out = out_path.with_name(
-                f"rt_eval_compare_{args.label}_coverage_by_species_group.png"
-            )
+            cov_out = out_path.with_name(f"{out_path.stem}_coverage_by_species_group.png")
             # Legend above the plot, centered, with extra top margin.
             plt.legend(
                 loc="upper center",
@@ -229,20 +237,16 @@ def main() -> None:
             plt.savefig(cov_out, dpi=200)
             plt.close()
             print(f"[compare] Wrote coverage comparison plot to {cov_out}")
-            coverage_plot_written = True
-
             # Joint RMSE + coverage figure (two subplots)
             fig_width_joint = max(fig_width, fig_width_cov)
-            fig, (ax_rmse, ax_cov) = plt.subplots(
-                2, 1, figsize=(fig_width_joint, 6.0), sharex=True
-            )
+            fig, (ax_rmse, ax_cov) = plt.subplots(2, 1, figsize=(fig_width_joint, 6.0), sharex=True)
 
             # Top: RMSE comparison
             ax_rmse.bar(
                 x - width / 2,
                 merged["rmse_hier"],
                 width,
-                label="Hierarchical",
+                label=args.hier_label,
                 color="tab:blue",
                 alpha=0.8,
             )
@@ -250,7 +254,7 @@ def main() -> None:
                 x + width / 2,
                 merged["rmse_lasso"],
                 width,
-                label="Lasso",
+                label=args.lasso_label,
                 color="tab:orange",
                 alpha=0.8,
             )
@@ -261,7 +265,7 @@ def main() -> None:
                 x_cov - width_cov / 2,
                 cov["compound_coverage_hier"],
                 width_cov,
-                label="Hierarchical",
+                label=args.hier_label,
                 color="tab:blue",
                 alpha=0.8,
             )
@@ -269,7 +273,7 @@ def main() -> None:
                 x_cov + width_cov / 2,
                 cov["compound_coverage_lasso"],
                 width_cov,
-                label="Lasso",
+                label=args.lasso_label,
                 color="tab:orange",
                 alpha=0.8,
             )
@@ -288,10 +292,8 @@ def main() -> None:
 
             # Layout and overall title (draw title after layout so it sits close to the top axes)
             fig.tight_layout()
-            fig.suptitle("Hierarchical vs Lasso (Test Fold)", y=0.98)
-            joint_out = out_path.with_name(
-                f"rt_eval_compare_{args.label}_rmse_coverage_by_species_group.png"
-            )
+            fig.suptitle(f"{args.hier_label} vs {args.lasso_label} (Test Fold)", y=0.98)
+            joint_out = out_path.with_name(f"{out_path.stem}_rmse_coverage_by_species_group.png")
             fig.savefig(joint_out, dpi=200)
             plt.close(fig)
             print(f"[compare] Wrote joint RMSE+coverage plot to {joint_out}")
@@ -307,7 +309,7 @@ def main() -> None:
             df["rmse"],
             color="tab:blue",
             alpha=0.8,
-            label="Hierarchical",
+            label=args.hier_label,
         )
         plt.xticks(
             x,
@@ -317,7 +319,7 @@ def main() -> None:
         )
         plt.ylabel("RMSE (min)")
         plt.xlabel("Species group")
-        plt.title(f"RT RMSE by species group ({args.label}): Hierarchical")
+        plt.title(f"RT RMSE by species group ({args.label}): {args.hier_label}")
         plt.tight_layout()
         plt.legend()
         plt.savefig(out_path, dpi=200)
@@ -335,7 +337,7 @@ def main() -> None:
             df["rmse"],
             color="tab:orange",
             alpha=0.8,
-            label="Lasso",
+            label=args.lasso_label,
         )
         plt.xticks(
             x,
@@ -345,7 +347,7 @@ def main() -> None:
         )
         plt.ylabel("RMSE (min)")
         plt.xlabel("Species group")
-        plt.title(f"RT RMSE by species group ({args.label}): Lasso")
+        plt.title(f"RT RMSE by species group ({args.label}): {args.lasso_label}")
         plt.tight_layout()
         plt.legend()
         plt.savefig(out_path, dpi=200)

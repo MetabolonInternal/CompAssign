@@ -1,158 +1,196 @@
 #!/usr/bin/env bash
-
 set -euo pipefail
 
-# Run RT production evaluations for hierarchical (PyMC) and lasso baseline
-# models on real-test RT CSVs (libs 208, 209).
+# Evaluate trained RT ridge coefficient-summary artifacts on realtest and regenerate plots.
 #
-# Flags:
-#   --only-hierarchical  Run only hierarchical model evaluations
-#   --only-lasso         Run only lasso baseline evaluations
-#   --no-compare         Skip plotting hierarchical vs lasso comparison (default: compare if inputs exist)
-#   --cap N              Use models trained at cap-N (default: 5, using output/rt_prod/lib{lib}_cap5)
+# This script expects a run directory created by:
+#   ./scripts/run_rt_prod.sh
 #
-# Assumes:
-#   - You are in the repo root
-#   - The cap-N models have been trained:
-#       output/rt_prod/lib208_capN
-#       output/rt_prod/lib209_capN
-#   - The following CSVs exist:
-#       repo_export/merged_training_realtest_lib208_chemclass_rt_prod.csv
-#       repo_export/merged_training_realtest_lib209_chemclass_rt_prod.csv
+# Usage:
+#   ./scripts/run_rt_prod_eval.sh
+#   ./scripts/run_rt_prod_eval.sh --cap 100 --libs 208,209
+#   ./scripts/run_rt_prod_eval.sh --run-dir output/rt_prod_YYYYMMDD_HHMMSS
 
-RUN_HIER=1
-RUN_LASSO=1
-RUN_COMPARE=1
-TRAIN_CAP=5
+usage() {
+  cat <<'EOF'
+Evaluate RT ridge models on realtest and generate plots.
+
+Usage:
+  ./scripts/run_rt_prod_eval.sh [options]
+
+Options:
+  --run-dir <path>       Run directory created by ./scripts/run_rt_prod.sh
+                         (default: read from output/rt_prod_latest.txt)
+  --cap <capN|N>         Cap label under run directory (default: cap100)
+  --libs <ids>           Comma-separated lib ids (default: 208,209)
+  --chunk-size <int>     Eval chunk size (default: 200000)
+  --log-every-chunks <n> Eval progress frequency (default: 5)
+  --skip-existing        Skip evals with existing JSON (default)
+  --no-skip-existing     Re-run evals even if JSON exists
+  --no-plots             Skip plot regeneration
+  -h, --help             Show this help text
+EOF
+}
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${REPO_ROOT}"
+
+RUN_DIR=""
+CAP="cap100"
+LIBS="208,209"
+CHUNK_SIZE="200000"
+LOG_EVERY_CHUNKS="5"
+SKIP_EXISTING="1"
+DO_PLOTS="1"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --only-hierarchical|--only-pymc|--only-hier)
-      RUN_LASSO=0
-      shift
-      ;;
-    --only-lasso)
-      RUN_HIER=0
-      shift
-      ;;
-    --no-compare)
-      RUN_COMPARE=0
-      shift
-      ;;
-    --cap|--train-cap)
-      if [[ $# -lt 2 ]]; then
-        echo "Missing value for $1 (expected cap number, e.g. 5 or 50)" >&2
-        exit 1
-      fi
-      TRAIN_CAP="$2"
+    --run-dir)
+      RUN_DIR="${2:-}"
       shift 2
       ;;
+    --cap)
+      CAP="${2:-}"
+      shift 2
+      ;;
+    --libs)
+      LIBS="${2:-}"
+      shift 2
+      ;;
+    --chunk-size)
+      CHUNK_SIZE="${2:-}"
+      shift 2
+      ;;
+    --log-every-chunks)
+      LOG_EVERY_CHUNKS="${2:-}"
+      shift 2
+      ;;
+    --skip-existing)
+      SKIP_EXISTING="1"
+      shift 1
+      ;;
+    --no-skip-existing)
+      SKIP_EXISTING="0"
+      shift 1
+      ;;
+    --no-plots)
+      DO_PLOTS="0"
+      shift 1
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
     *)
-      echo "Usage: $0 [--only-hierarchical|--only-lasso|--no-compare]" >&2
-      exit 1
+      echo "ERROR: Unknown argument: $1" >&2
+      usage >&2
+      exit 2
       ;;
   esac
 done
 
-run_pair() {
-  local lib_id=$1
-  local label=$2    # cap10 or realtest
-  local csv=$3
-
-  local train_dir="output/rt_prod/lib${lib_id}_cap${TRAIN_CAP}"
-
-  # Skip this lib entirely if the test CSV is missing, so the script
-  # can still run (and compare) for the libs that are available.
-  if [[ ! -f "$csv" ]]; then
-    echo "== Skipping lib ${lib_id} (${label}): missing test CSV ${csv} =="
-    return
-  fi
-
-  if [[ "$label" == "cap10" ]]; then
-    local hier_json="rt_eval_cap10_streaming.json"
-    local lasso_json="rt_eval_lasso_cap10.json"
-  else
-  local hier_json="rt_eval_realtest_streaming.json"
-  local lasso_json="rt_eval_lasso_realtest.json"
-  fi
-
-  local hier_trace="${train_dir}/models/rt_trace.nc"
-  local hier_config="${train_dir}/config.json"
-
-  # If the PyMC model is missing, skip the entire lib (including lasso).
-  if [[ ! -f "$hier_config" || ! -f "$hier_trace" ]]; then
-    echo "== Skipping lib ${lib_id} (${label}): missing PyMC model under ${train_dir} =="
-    return
-  fi
-
-  if [[ $RUN_HIER -eq 1 ]]; then
-    echo "== Hierarchical (streaming): ${label} (lib ${lib_id}) =="
-    python scripts/pipelines/eval_rt_prod_streaming.py \
-      --train-output-dir "$train_dir" \
-      --test-csv "$csv" \
-      --chunk-size 50000 \
-      --max-test-rows 0 \
-      --n-samples 200 \
-      --label "$label" \
-      --output-json "$train_dir/results/${hier_json}"
-  fi
-
-  if [[ $RUN_LASSO -eq 1 ]]; then
-    echo "== Lasso baseline: ${label} (lib ${lib_id}) =="
-    python scripts/pipelines/eval_rt_lasso_baseline.py \
-      --train-output-dir "$train_dir" \
-      --lib-id "$lib_id" \
-      --test-csv "$csv" \
-      --chunk-size 50000 \
-      --max-test-rows 0 \
-      --label "$label" \
-      --output-json "$train_dir/results/${lasso_json}"
-  fi
-}
-
-run_pair 208 "realtest" "repo_export/lib208/realtest/merged_training_realtest_lib208_chemclass_rt_prod.csv"
-run_pair 209 "realtest" "repo_export/lib209/realtest/merged_training_realtest_lib209_chemclass_rt_prod.csv"
-
-if [[ $RUN_COMPARE -eq 1 ]]; then
-  echo "== Generating hierarchical vs lasso comparison plots by species group =="
-  compare_plot() {
-    local lib_id=$1
-    local label=$2
-
-    # Hierarchical results are taken from the selected TRAIN_CAP model directory.
-    local hier_csv="output/rt_prod/lib${lib_id}_cap${TRAIN_CAP}/results/rt_eval_streaming_by_species_group_${label}.csv"
-
-    # Prefer lasso results co-located with the hier model; otherwise fall back to cap5 lasso outputs.
-    local lasso_csv_self="output/rt_prod/lib${lib_id}_cap${TRAIN_CAP}/results/rt_eval_lasso_by_species_group_${label}.csv"
-    local lasso_csv_cap5="output/rt_prod/lib${lib_id}_cap5/results/rt_eval_lasso_by_species_group_${label}.csv"
-
-    local lasso_csv=""
-    if [[ -f "$lasso_csv_self" ]]; then
-      lasso_csv="$lasso_csv_self"
-    elif [[ -f "$lasso_csv_cap5" ]]; then
-      lasso_csv="$lasso_csv_cap5"
-    fi
-
-    if [[ ! -f "$hier_csv" ]]; then
-      echo "[compare] Missing hierarchical CSV: $hier_csv (skip)"
-      return
-    fi
-    if [[ -z "$lasso_csv" ]]; then
-      echo "[compare] Missing lasso CSV for lib${lib_id} ${label} (skip)"
-      return
-    fi
-
-    local out_dir
-    out_dir=$(dirname "$hier_csv")
-    python scripts/pipelines/compare_rt_models_by_group.py \
-      --hier-csv "$hier_csv" \
-      --lasso-csv "$lasso_csv" \
-      --label "$label" \
-      --output "${out_dir}/rt_eval_compare_${label}_rmse_by_species_group.png"
-  }
-
-  compare_plot 208 realtest
-  compare_plot 209 realtest
+if [[ "$CAP" =~ ^[0-9]+$ ]]; then
+  CAP="cap${CAP}"
 fi
 
-echo "== RT production evaluation runs complete =="
+if [[ -z "${RUN_DIR}" ]]; then
+  LATEST_PATH="${REPO_ROOT}/output/rt_prod_latest.txt"
+  if [[ ! -f "${LATEST_PATH}" ]]; then
+    echo "ERROR: --run-dir not provided and missing pointer: ${LATEST_PATH}" >&2
+    exit 2
+  fi
+  RUN_DIR="$(cat "${LATEST_PATH}" | tr -d '[:space:]')"
+fi
+if [[ "${RUN_DIR}" != /* ]]; then
+  RUN_DIR="${REPO_ROOT}/${RUN_DIR}"
+fi
+if [[ ! -d "${RUN_DIR}" ]]; then
+  echo "ERROR: Run directory does not exist: ${RUN_DIR}" >&2
+  exit 2
+fi
+
+mkdir -p "${RUN_DIR}/logs"
+
+run_cmd() {
+  local log_path="$1"
+  shift
+  echo "" | tee -a "${log_path}" >/dev/null
+  echo "[run] $*" | tee -a "${log_path}"
+  # shellcheck disable=SC2068
+  "$@" 2>&1 | tee -a "${log_path}"
+}
+
+eval_model() {
+  local lib_id="$1"
+  local coeff_npz="$2"
+  local test_csv="$3"
+  local log_path="$4"
+
+  local out_json=""
+  if [[ "${coeff_npz}" == */models/stage1_coeff_summaries_posterior.npz ]]; then
+    out_json="$(dirname "$(dirname "${coeff_npz}")")/results/rt_eval_coeff_summaries_by_support_realtest.json"
+  else
+    out_json="$(dirname "${coeff_npz}")/results/rt_eval_coeff_summaries_by_support_realtest.json"
+  fi
+  if [[ "${SKIP_EXISTING}" == "1" && -f "${out_json}" ]]; then
+    echo "[eval] Skip (exists): ${out_json}"
+    return 0
+  fi
+
+  run_cmd "${log_path}" \
+    poetry run python -u scripts/pipelines/eval_rt_coeff_summaries_by_support.py \
+      --coeff-npz "${coeff_npz}" \
+      --test-csv "${test_csv}" \
+      --chunk-size "${CHUNK_SIZE}" \
+      --log-every-chunks "${LOG_EVERY_CHUNKS}" \
+      --label realtest
+}
+
+IFS=',' read -r -a LIB_ARR <<< "${LIBS}"
+for lib in "${LIB_ARR[@]}"; do
+  lib="$(echo "${lib}" | tr -d '[:space:]')"
+  if [[ -z "${lib}" ]]; then
+    continue
+  fi
+  if [[ ! "${lib}" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: Invalid lib id: ${lib}" >&2
+    exit 2
+  fi
+
+  TEST_CSV="repo_export/lib${lib}/realtest/merged_training_realtest_lib${lib}_chemclass_rt_prod.csv"
+  if [[ ! -f "${TEST_CSV}" ]]; then
+    echo "ERROR: Missing realtest CSV: ${TEST_CSV}" >&2
+    exit 2
+  fi
+
+  echo "[eval] lib${lib} ${CAP}"
+
+  PARTIAL_COEFF="${RUN_DIR}/lib${lib}/${CAP}/features_none/pymc_pooled_species_comp_hier_supercat_cluster_supercat/models/stage1_coeff_summaries_posterior.npz"
+  if [[ -f "${PARTIAL_COEFF}" ]]; then
+    eval_model "${lib}" "${PARTIAL_COEFF}" "${TEST_CSV}" \
+      "${RUN_DIR}/logs/lib${lib}_${CAP}_none_pymc_pooled_species_comp_hier_supercat_cluster_supercat.eval.log"
+  else
+    echo "[eval] Skip missing partial coeff: ${PARTIAL_COEFF}"
+  fi
+
+  SUPERCAT_COEFF="${RUN_DIR}/lib${lib}/${CAP}/features_none/pymc_collapsed_group_species_cluster/models/stage1_coeff_summaries_posterior.npz"
+  if [[ -f "${SUPERCAT_COEFF}" ]]; then
+    eval_model "${lib}" "${SUPERCAT_COEFF}" "${TEST_CSV}" \
+      "${RUN_DIR}/logs/lib${lib}_${CAP}_none_pymc_collapsed_group_species_cluster.eval.log"
+  else
+    echo "[eval] Skip missing supercat coeff: ${SUPERCAT_COEFF}"
+  fi
+
+  SK_COEFF="${RUN_DIR}/lib${lib}/${CAP}/sklearn_ridge_species_cluster/stage1_coeff_summaries.npz"
+  if [[ -f "${SK_COEFF}" ]]; then
+    eval_model "${lib}" "${SK_COEFF}" "${TEST_CSV}" \
+      "${RUN_DIR}/logs/lib${lib}_${CAP}_sklearn_ridge_species_cluster.eval.log"
+  fi
+done
+
+if [[ "${DO_PLOTS}" == "1" ]]; then
+  echo "[eval] Plotting (global + by support + by species_cluster)"
+  ./scripts/plot_rt_multilevel.sh --run-dir "${RUN_DIR}" --cap "${CAP}" --libs "${LIBS}"
+fi
+
+echo "[eval] Done."

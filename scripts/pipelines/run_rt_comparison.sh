@@ -33,7 +33,7 @@ OUT_DIR="$REPO_ROOT/output/rt_comparison/default"
   if [[ $QUICK -eq 1 ]]; then
     echo "[run_rt_comparison] Running (QUICK)..."
     set -x
-    poetry run python "$REPO_ROOT/src/utils/rt_model_comparison.py" \
+    poetry run python "$REPO_ROOT/src/compassign/rt/model_comparison.py" \
       --quick \
       --output-dir "$OUT_DIR" \
       ${EXTRA_ARGS[@]:-}
@@ -41,7 +41,7 @@ OUT_DIR="$REPO_ROOT/output/rt_comparison/default"
   else
     echo "[run_rt_comparison] Running..."
     set -x
-    poetry run python "$REPO_ROOT/src/utils/rt_model_comparison.py" \
+    poetry run python "$REPO_ROOT/src/compassign/rt/model_comparison.py" \
       --output-dir "$OUT_DIR" \
       ${EXTRA_ARGS[@]:-}
     set +x

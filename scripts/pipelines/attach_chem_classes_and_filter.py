@@ -25,8 +25,11 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import List
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,6 +58,19 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _read_classes(classes_path: Path) -> pd.DataFrame:
+    if classes_path.suffix == ".parquet":
+        classes_df = pd.read_parquet(classes_path)
+    else:
+        classes_df = pd.read_csv(classes_path)
+    if not {"chem_id", "compound_class"}.issubset(classes_df.columns):
+        raise SystemExit("Classes file must contain 'chem_id' and 'compound_class' columns")
+    classes_df = classes_df[["chem_id", "compound_class"]].copy()
+    classes_df["chem_id"] = classes_df["chem_id"].astype("Int64")
+    classes_df["compound_class"] = classes_df["compound_class"].astype("Int64")
+    return classes_df
+
+
 def main() -> None:
     args = parse_args()
 
@@ -65,72 +81,93 @@ def main() -> None:
     if not args.classes.exists():
         raise SystemExit(f"Classes file not found: {args.classes}")
 
-    # Load data
-    df = pd.read_parquet(args.input)
+    pf = pq.ParquetFile(args.input)
+    schema = pf.schema_arrow
+    if "comp_id" not in schema.names:
+        raise SystemExit(f"Input Parquet {args.input} missing required column 'comp_id'")
+
     map_df = pd.read_csv(args.lib_mapping)
-    if args.classes.suffix == ".parquet":
-        classes_df = pd.read_parquet(args.classes)
-    else:
-        classes_df = pd.read_csv(args.classes)
+    classes_df = _read_classes(args.classes)
 
-    for col in ["comp_id"]:
-        if col not in df.columns:
-            raise SystemExit(f"Input Parquet {args.input} missing required column '{col}'")
-    if "lib_id" not in df.columns and "lib_id" in map_df.columns:
-        # If per-lib files don't carry lib_id, infer from mapping
+    has_lib_id = "lib_id" in schema.names and "lib_id" in map_df.columns
+    if not has_lib_id and "lib_id" in map_df.columns:
         lib_ids = map_df["lib_id"].dropna().unique()
-        if len(lib_ids) == 1:
-            df["lib_id"] = lib_ids[0]
-        else:
+        if len(lib_ids) != 1:
             raise SystemExit("Mapping has multiple lib_id values but input has no lib_id column")
-
-    # Normalize types for join
-    df["comp_id"] = df["comp_id"].astype("Int64")
-    map_df["comp_id"] = map_df["comp_id"].astype("Int64")
-    if "lib_id" in df.columns and "lib_id" in map_df.columns:
-        on_cols = ["lib_id", "comp_id"]
+        inferred_lib_id = lib_ids[0]
     else:
-        on_cols = ["comp_id"]
+        inferred_lib_id = None
 
-    merged = df.merge(map_df[on_cols + ["chemical_id"]], on=on_cols, how="left")
+    on_cols = ["lib_id", "comp_id"] if has_lib_id else ["comp_id"]
+    map_df = map_df[on_cols + ["chemical_id"]].copy()
+    map_df["comp_id"] = map_df["comp_id"].astype("Int64")
+    if "lib_id" in map_df.columns:
+        map_df["lib_id"] = map_df["lib_id"].astype("Int64")
+    map_df["chemical_id"] = map_df["chemical_id"].astype("Int64")
+    classes_df = classes_df.rename(columns={"chem_id": "chemical_id"})
 
-    # Drop rows with no chemical_id mapping (true unmapped compounds)
-    before_map = len(merged)
-    merged = merged.dropna(subset=["chemical_id"]).copy()
-    after_map = len(merged)
-    dropped_map = before_map - after_map
+    cols_to_read: List[str] = list(schema.names)
+    out = args.output or args.input.with_name(args.input.stem + "_chemclass.parquet")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if out.exists():
+        out.unlink()
+    writer: pq.ParquetWriter | None = None
+
+    total_before_map = 0
+    total_after_map = 0
+    total_before_class = 0
+    total_after_class = 0
+
+    try:
+        for batch in pf.iter_batches(batch_size=200_000, columns=cols_to_read):
+            df = batch.to_pandas()
+            if df.empty:
+                continue
+
+            total_before_map += int(len(df))
+            if inferred_lib_id is not None:
+                df["lib_id"] = inferred_lib_id
+
+            df["comp_id"] = df["comp_id"].astype("Int64")
+            if "lib_id" in df.columns:
+                df["lib_id"] = df["lib_id"].astype("Int64")
+
+            merged = df.merge(map_df, on=on_cols, how="left")
+            merged = merged.dropna(subset=["chemical_id"]).copy()
+            total_after_map += int(len(merged))
+            if merged.empty:
+                continue
+
+            merged["chemical_id"] = merged["chemical_id"].astype("Int64")
+            merged = merged.merge(classes_df, on="chemical_id", how="left")
+            total_before_class += int(len(merged))
+            filtered = merged.dropna(subset=["compound_class"]).copy()
+            total_after_class += int(len(filtered))
+            if filtered.empty:
+                continue
+
+            table = pa.Table.from_pandas(filtered, preserve_index=False)
+            if writer is None:
+                writer = pq.ParquetWriter(out, table.schema)
+            writer.write_table(table)
+    finally:
+        if writer is not None:
+            writer.close()
+
+    dropped_map = total_before_map - total_after_map
     if dropped_map > 0:
         print(
             f"[attach_chem_classes] Dropped {dropped_map:,} rows with comp_id not in mapping "
-            f"({before_map:,} -> {after_map:,})"
+            f"({total_before_map:,} -> {total_after_map:,})"
         )
-    merged["chemical_id"] = merged["chemical_id"].astype("Int64")
-
-    # Attach compound_class from chem_classes
-    if not {"chem_id", "compound_class"}.issubset(classes_df.columns):
-        raise SystemExit("Classes file must contain 'chem_id' and 'compound_class' columns")
-    classes_df = classes_df[["chem_id", "compound_class"]].copy()
-    classes_df["chem_id"] = classes_df["chem_id"].astype("Int64")
-
-    merged = merged.merge(
-        classes_df.rename(columns={"chem_id": "chemical_id"}),
-        on="chemical_id",
-        how="left",
-    )
-
-    # Filter out rows with missing compound_class (i.e., chem_ids without embeddings/classes)
-    before = len(merged)
-    filtered = merged.dropna(subset=["compound_class"]).copy()
-    after = len(filtered)
-    dropped = before - after
-
+    dropped = total_before_class - total_after_class
     print(
-        f"[attach_chem_classes] {args.input.name}: rows before={before:,}, "
-        f"after={after:,} (dropped {dropped:,} rows without compound_class)"
+        f"[attach_chem_classes] {args.input.name}: rows before={total_before_class:,}, "
+        f"after={total_after_class:,} (dropped {dropped:,} rows without compound_class)"
     )
 
-    out = args.output or args.input.with_name(args.input.stem + "_chemclass.parquet")
-    filtered.to_parquet(out, index=False)
+    if total_after_class == 0:
+        raise SystemExit(f"[attach_chem_classes] No rows written for {args.input}")
     print(f"[attach_chem_classes] Wrote filtered Parquet to {out}")
 
 
