@@ -6,7 +6,7 @@ import pandas as pd
 # Ensure the project root (containing the `src` package) is importable when tests run standalone
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.compassign.utils import compute_all_chemical_features
+from src.compassign.utils import compute_all_chemical_features  # noqa: E402
 
 
 def _build_peak_df():

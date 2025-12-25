@@ -7,5 +7,4 @@ to work.
 
 from __future__ import annotations
 
-from scripts.experiments.active_learning.aggregate_al_results import *  # type: ignore  # noqa: F403
-
+from scripts.experiments.active_learning.aggregate_al_results import *  # type: ignore  # noqa: F401,F403

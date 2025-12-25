@@ -7,7 +7,9 @@ to work (tests and some utilities rely on it).
 
 from __future__ import annotations
 
-from scripts.data_prep.create_synthetic_data import create_metabolomics_data, create_synthetic_dataset
+from scripts.data_prep.create_synthetic_data import (
+    create_metabolomics_data,
+    create_synthetic_dataset,
+)
 
 __all__ = ["create_metabolomics_data", "create_synthetic_dataset"]
-

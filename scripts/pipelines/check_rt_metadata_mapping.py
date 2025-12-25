@@ -73,7 +73,9 @@ def _find_col(df: pd.DataFrame, key: str) -> str:
     for c in df.columns:
         if _norm_key(c) == want:
             return c
-    raise KeyError(f"Could not find column '{key}' (normalized='{want}') in CSV columns: {list(df.columns)}")
+    raise KeyError(
+        f"Could not find column '{key}' (normalized='{want}') in CSV columns: {list(df.columns)}"
+    )
 
 
 def load_mapping(
@@ -99,7 +101,9 @@ def load_mapping(
 
     mapping = df[[ssid_col, group_col]].copy()
     mapping["species_raw"] = species_raw
-    mapping.rename(columns={ssid_col: "sample_set_id", group_col: "species_group_raw"}, inplace=True)
+    mapping.rename(
+        columns={ssid_col: "sample_set_id", group_col: "species_group_raw"}, inplace=True
+    )
     mapping["sample_set_id"] = mapping["sample_set_id"].astype(str)
     return mapping[["sample_set_id", "species_raw", "species_group_raw"]]
 
@@ -161,7 +165,9 @@ def main() -> None:
     def configs_for(libs_in: Iterable[int]) -> Dict[int, Tuple[Path, Path]]:
         cfg: Dict[int, Tuple[Path, Path]] = {}
         for lib_id in libs_in:
-            parquet_path = repo_export / "merged_training" / f"merged_training_all_lib{lib_id}.parquet"
+            parquet_path = (
+                repo_export / "merged_training" / f"merged_training_all_lib{lib_id}.parquet"
+            )
             csv_path = data_root / f"_lib_{lib_id}_input.csv"
             cfg[int(lib_id)] = (parquet_path, csv_path)
         return cfg

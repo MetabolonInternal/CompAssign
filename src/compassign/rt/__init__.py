@@ -5,7 +5,6 @@ This subpackage consolidates all RT-related model implementations under a single
 namespace to keep `src/compassign/` tidy.
 """
 
-from .hierarchical import HierarchicalRTModel
 from .fast_ridge_prod import (  # noqa: F401
     RidgeGroupCompoundRTModel,
     RidgeProdTrainArtifacts,
@@ -15,7 +14,6 @@ from .fast_ridge_prod import (  # noqa: F401
 from .pymc_collapsed_ridge import Stage1CoeffSummaries  # noqa: F401
 
 __all__ = [
-    "HierarchicalRTModel",
     "RidgeGroupCompoundRTModel",
     "RidgeProdTrainArtifacts",
     "Stage1CoeffSummaries",

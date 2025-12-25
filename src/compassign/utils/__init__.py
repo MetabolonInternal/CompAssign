@@ -53,4 +53,3 @@ __all__ = [
     "create_assignment_plots",
     "create_combined_dashboard",
 ]
-

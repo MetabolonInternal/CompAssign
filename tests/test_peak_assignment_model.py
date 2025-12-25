@@ -7,8 +7,8 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.compassign.assignment import PeakAssignment, PresencePrior
-import arviz as az
+from src.compassign.assignment import PeakAssignment, PresencePrior  # noqa: E402
+import arviz as az  # noqa: E402
 
 
 def _build_simple_assignment():

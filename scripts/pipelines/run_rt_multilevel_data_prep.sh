@@ -9,7 +9,7 @@ set -euo pipefail
 #   3) realtest RT CSVs (per lib, under repo_export/lib{lib}/realtest/)
 #
 # Defaults are chosen to match the expectations of:
-#   - scripts/run_rt_pymc_multilevel_cap100.sh
+#   - scripts/run_rt_prod.sh
 #
 # Usage:
 #   bash scripts/pipelines/run_rt_multilevel_data_prep.sh

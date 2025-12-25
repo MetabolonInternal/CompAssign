@@ -215,7 +215,6 @@ class ClusterLassoBaseline:
         self._species_features = species_features
 
         for cluster_id in np.unique(self.species_cluster):
-            species_in_cluster = np.where(self.species_cluster == cluster_id)[0]
             cluster_rows = df[df["cluster"] == cluster_id]
             if cluster_rows.empty:
                 continue

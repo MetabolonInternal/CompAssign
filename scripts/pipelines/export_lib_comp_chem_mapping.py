@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Set
 
 import os
 
@@ -114,7 +114,9 @@ def fetch_library_metadata_for_lib(
     """
     comp_ids = {int(c) for c in comp_ids}
     if not comp_ids:
-        return pd.DataFrame(columns=["lib_id", "comp_id", "chemical_id", "report_name", "short_name"])
+        return pd.DataFrame(
+            columns=["lib_id", "comp_id", "chemical_id", "report_name", "short_name"]
+        )
 
     # Prefer the modern python-oracledb driver when the URL uses the legacy
     # "oracle://" scheme by swapping it to "oracle+oracledb://".
@@ -157,9 +159,7 @@ def main() -> None:
     # Load .env for Oracle connection configuration
     load_dotenv()
     conn_str: Optional[str] = (
-        args.oracle_conn
-        or os.environ.get("PROD_READ_CONN_STR")
-        or os.environ.get("READ_CONN_STR")
+        args.oracle_conn or os.environ.get("PROD_READ_CONN_STR") or os.environ.get("READ_CONN_STR")
     )
     if not conn_str:
         raise SystemExit(
@@ -176,10 +176,14 @@ def main() -> None:
         try:
             if client_dir:
                 oracledb.init_oracle_client(lib_dir=client_dir)
-                print(f"[export] Initialized python-oracledb thick mode with client at {client_dir}")
+                print(
+                    f"[export] Initialized python-oracledb thick mode with client at {client_dir}"
+                )
             else:
                 oracledb.init_oracle_client()
-                print("[export] Initialized python-oracledb thick mode with default client settings")
+                print(
+                    "[export] Initialized python-oracledb thick mode with default client settings"
+                )
         except Exception as exc:  # pragma: no cover - best-effort
             print(f"[export] Warning: failed to init Oracle client for thick mode ({exc})")
 
@@ -223,7 +227,9 @@ def main() -> None:
             mask_rows.append(comp in comp_ids)
         filtered = lib_df[mask_rows].copy()
         if filtered.empty:
-            print(f"[export] lib_id={lib}: no overlap between Oracle metadata and Parquet comp_ids.")
+            print(
+                f"[export] lib_id={lib}: no overlap between Oracle metadata and Parquet comp_ids."
+            )
             continue
         filtered.sort_values(["lib_id", "comp_id"], inplace=True)
 

@@ -49,7 +49,12 @@ class AggStats:
 
     def to_metrics(self) -> Dict[str, float]:
         if self.n == 0:
-            return {"n_obs": 0, "rmse": float("nan"), "mae": float("nan"), "coverage_95": float("nan")}
+            return {
+                "n_obs": 0,
+                "rmse": float("nan"),
+                "mae": float("nan"),
+                "coverage_95": float("nan"),
+            }
         rmse = float(np.sqrt(self.sum_sq_err / self.n))
         mae = float(self.sum_abs_err / self.n)
         cov = float(self.sum_covered / self.n)
@@ -164,9 +169,7 @@ def load_lasso_models(models_root: Path, lib_id: int) -> Dict[Tuple[int, int], L
         # Features: all numeric IS*/ES_*/RS* columns; IS selection is shared across models,
         # ES selection can be sparse and differs per lasso, as encoded in the coefficients.
         feature_cols = [
-            c
-            for c in df.columns
-            if c not in reserved and pd.api.types.is_numeric_dtype(df[c])
+            c for c in df.columns if c not in reserved and pd.api.types.is_numeric_dtype(df[c])
         ]
         feature_cols_sorted = sorted(feature_cols)  # deterministic order
 

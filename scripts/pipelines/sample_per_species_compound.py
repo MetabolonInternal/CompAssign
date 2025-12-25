@@ -147,10 +147,10 @@ def _load_species_mapping_info(species_mapping: Path) -> tuple[Set[int], Dict[in
 
     good_ids = set(sm_df["sample_set_id"].unique().tolist())
     if not good_ids:
-        raise SystemExit(
-            f"No sample_set_id values found in species mapping {species_mapping}"
-        )
-    ssid_to_species = {int(row["sample_set_id"]): int(row["species"]) for _, row in sm_df.iterrows()}
+        raise SystemExit(f"No sample_set_id values found in species mapping {species_mapping}")
+    ssid_to_species = {
+        int(row["sample_set_id"]): int(row["species"]) for _, row in sm_df.iterrows()
+    }
     return good_ids, ssid_to_species
 
 
@@ -169,7 +169,9 @@ def sample_file(
 
     if "species_matrix_type" not in schema.names or "comp_id" not in schema.names:
         raise SystemExit("Input must contain 'species_matrix_type' and 'comp_id' columns")
-    if (good_sample_set_ids is not None or ssid_to_species is not None) and "sample_set_id" not in schema.names:
+    if (
+        good_sample_set_ids is not None or ssid_to_species is not None
+    ) and "sample_set_id" not in schema.names:
         raise SystemExit(
             "Input uses species mapping filtering but Parquet is missing 'sample_set_id' column"
         )
@@ -280,9 +282,7 @@ def main() -> None:
             raise SystemExit(f"Species mapping not found: {args.species_mapping}")
         good_sample_set_ids, ssid_to_species = _load_species_mapping_info(args.species_mapping)
 
-    out = args.output or args.input.with_name(
-        f"{args.input.stem}_cap{args.cap_per_pair}.parquet"
-    )
+    out = args.output or args.input.with_name(f"{args.input.stem}_cap{args.cap_per_pair}.parquet")
     sample_file(
         args.input,
         out,

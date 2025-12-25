@@ -46,7 +46,6 @@ def mean_pool_last_hidden(last_hidden: torch.Tensor, attention_mask: torch.Tenso
 
 def main() -> None:
     args = parse_args()
-    rng = np.random.default_rng(args.seed)
 
     if not args.input.exists():
         raise FileNotFoundError(f"Input TSV not found: {args.input}")

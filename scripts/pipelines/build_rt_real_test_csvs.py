@@ -10,19 +10,16 @@ Steps per lib:
   3) Convert the filtered Parquet into an RT production CSV compatible with
      scripts/pipelines/train_rt_prod.py.
 
-This script does NOT run the RT evaluation; use eval_rt_prod_cap10.py once
-the real-test RT CSVs have been written.
+This script does NOT run RT model evaluation; use `./scripts/run_rt_prod_eval.sh`
+after training to evaluate coefficient-summary artifacts on the generated CSVs.
 """
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Iterable
 
-import numpy as np
 import pandas as pd
-import pyarrow.dataset as ds  # used elsewhere if needed
 import pyarrow.parquet as pq
 import pyarrow as pa
 
@@ -44,13 +41,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--merged-208",
         type=Path,
-        default=REPO_ROOT / "repo_export" / "merged_training" / "merged_training_all_lib208.parquet",
+        default=REPO_ROOT
+        / "repo_export"
+        / "merged_training"
+        / "merged_training_all_lib208.parquet",
         help="Merged training Parquet for lib 208",
     )
     parser.add_argument(
         "--merged-209",
         type=Path,
-        default=REPO_ROOT / "repo_export" / "merged_training" / "merged_training_all_lib209.parquet",
+        default=REPO_ROOT
+        / "repo_export"
+        / "merged_training"
+        / "merged_training_all_lib209.parquet",
         help="Merged training Parquet for lib 209",
     )
     parser.add_argument(
@@ -197,7 +200,9 @@ def main() -> None:
     out_208_dir = args.out_root / "lib208" / "realtest"
     real_208_parq = out_208_dir / "merged_training_realtest_lib208.parquet"
     filter_real_test(args.merged_208, split_df, lib_id=208, out_parquet=real_208_parq)
-    chemclass_208 = run_attach_chem_classes(real_208_parq, lib_id=208, chem_classes=args.chem_classes)
+    chemclass_208 = run_attach_chem_classes(
+        real_208_parq, lib_id=208, chem_classes=args.chem_classes
+    )
     rt_csv_208 = out_208_dir / "merged_training_realtest_lib208_chemclass_rt_prod.csv"
     run_make_rt_csv(chemclass_208, lib_id=208, out_csv=rt_csv_208)
 
@@ -205,7 +210,9 @@ def main() -> None:
     out_209_dir = args.out_root / "lib209" / "realtest"
     real_209_parq = out_209_dir / "merged_training_realtest_lib209.parquet"
     filter_real_test(args.merged_209, split_df, lib_id=209, out_parquet=real_209_parq)
-    chemclass_209 = run_attach_chem_classes(real_209_parq, lib_id=209, chem_classes=args.chem_classes)
+    chemclass_209 = run_attach_chem_classes(
+        real_209_parq, lib_id=209, chem_classes=args.chem_classes
+    )
     rt_csv_209 = out_209_dir / "merged_training_realtest_lib209_chemclass_rt_prod.csv"
     run_make_rt_csv(chemclass_209, lib_id=209, out_csv=rt_csv_209)
 

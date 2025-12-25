@@ -78,4 +78,3 @@ def test_loader_builds_species_at_species_cluster_level(tmp_path):
     assert species_indices.max() < loaded.n_species
     assert np.all(loaded.run_species >= 0)
     assert np.all(loaded.run_species < loaded.n_species)
-

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import numpy as np
-import pandas as pd
 
 from scripts.create_synthetic_data import create_metabolomics_data
 
@@ -49,4 +48,3 @@ def test_generator_outputs_descriptor_groups_and_budgets():
     anchor_ids = compound_df.loc[groups == "anchor", "compound_id"].tolist()
     for cid in anchor_ids:
         assert int(counts.get(cid, 0)) >= 3
-

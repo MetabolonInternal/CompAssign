@@ -335,7 +335,9 @@ def compute_correlation_features(
         return 0.0
 
     # Rough proxy: correlated peaks -> similar RT and comparable intensity
-    intensity_ratios = np.abs(np.log1p(rt_window["intensity"].to_numpy(dtype=float)) - np.log1p(intensity))
+    intensity_ratios = np.abs(
+        np.log1p(rt_window["intensity"].to_numpy(dtype=float)) - np.log1p(intensity)
+    )
     close = intensity_ratios < 1.0
     return float(max(0, int(np.sum(close)) - 1))
 
@@ -463,4 +465,3 @@ __all__ = [
     "ChemEmbedding",
     "load_chemberta_pca20",
 ]
-

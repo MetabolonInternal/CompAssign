@@ -369,7 +369,9 @@ class RidgeGroupCompoundRTModel:
             or self.v_diag_compound is None
             or self.sigma2_mean_compound is None
         ):
-            raise ValueError("Model is missing Bayesian posterior arrays; retrain with Bayesian stats.")
+            raise ValueError(
+                "Model is missing Bayesian posterior arrays; retrain with Bayesian stats."
+            )
 
         n = int(comp_id.size)
         pred_mean = np.full(n, np.nan, dtype=float)
@@ -448,7 +450,9 @@ class RidgeGroupCompoundRTModel:
         if self.v_diag_compound is not None:
             payload["v_diag_compound"] = np.asarray(self.v_diag_compound, dtype=np.float32)
         if self.sigma2_mean_compound is not None:
-            payload["sigma2_mean_compound"] = np.asarray(self.sigma2_mean_compound, dtype=np.float32)
+            payload["sigma2_mean_compound"] = np.asarray(
+                self.sigma2_mean_compound, dtype=np.float32
+            )
 
         np.savez_compressed(path, **payload)
 
@@ -900,7 +904,9 @@ def train_ridge_prod_model(
         if es_cols:
             chunk[es_cols] = chunk[es_cols].fillna(0.0)
             if include_es_group1:
-                mask1 = chunk["sampleset_id"].astype(int).isin(species_mapping.group1_sample_set_ids)
+                mask1 = (
+                    chunk["sampleset_id"].astype(int).isin(species_mapping.group1_sample_set_ids)
+                )
                 chunk.loc[~mask1, es_cols] = 0.0
 
         x = chunk[list(feature_cols)].to_numpy(dtype=np.float64, copy=False)
@@ -1018,7 +1024,9 @@ def train_ridge_prod_model(
         sigma2_mean_compound=sigma2_mean_c,
     )
 
-    species_group_example = tuple(sorted(set(species_mapping.sample_set_id_to_group_raw.values()))[:5])
+    species_group_example = tuple(
+        sorted(set(species_mapping.sample_set_id_to_group_raw.values()))[:5]
+    )
     trained_at = datetime.now().isoformat()
 
     return RidgeProdTrainArtifacts(
@@ -1098,4 +1106,3 @@ def write_ridge_prod_artifacts(
     )
 
     return model_path
-

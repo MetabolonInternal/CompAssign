@@ -7,7 +7,7 @@ import pandas as pd
 # Make sure the repository root is importable when running the test directly
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.compassign.assignment import PeakAssignment, PresencePrior
+from src.compassign.assignment import PeakAssignment, PresencePrior  # noqa: E402
 
 
 def _compute_probs_from_pack(

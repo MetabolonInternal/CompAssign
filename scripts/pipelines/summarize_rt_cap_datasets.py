@@ -92,7 +92,9 @@ def summarise_lib_caps(
         try:
             cap_num = int(cap_name.replace("cap", "", 1))
         except ValueError:
-            logger.warning("Unrecognised cap directory name %s under %s, skipping", cap_name, lib_dir)
+            logger.warning(
+                "Unrecognised cap directory name %s under %s, skipping", cap_name, lib_dir
+            )
             continue
         csv_path = _find_rt_csv(cap_dir, lib_name)
         if csv_path is None:
@@ -116,7 +118,9 @@ def summarise_lib_caps(
 
         cluster_col = _pick_column(CLUSTER_COL_CANDIDATES, list(df.columns))
         if cluster_col is None:
-            logger.info("No species cluster column found in %s, skipping cluster breakdown", csv_path)
+            logger.info(
+                "No species cluster column found in %s, skipping cluster breakdown", csv_path
+            )
             continue
 
         grouped = df.groupby(cluster_col, sort=True)
@@ -271,7 +275,9 @@ def main() -> None:
     for lib in libs:
         lib_dir = repo_export_dir / lib
         if not lib_dir.is_dir():
-            logger.warning("Library directory %s not found under %s, skipping", lib, repo_export_dir)
+            logger.warning(
+                "Library directory %s not found under %s, skipping", lib, repo_export_dir
+            )
             continue
         cap_summaries, cluster_summaries = summarise_lib_caps(
             lib_dir,

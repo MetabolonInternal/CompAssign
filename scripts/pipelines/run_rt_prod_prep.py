@@ -42,7 +42,9 @@ def run(cmd: List[str]) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Run RT production prep pipeline for one or more export roots.")
+    p = argparse.ArgumentParser(
+        description="Run RT production prep pipeline for one or more export roots."
+    )
     p.add_argument(
         "--export-root",
         type=Path,
@@ -190,7 +192,12 @@ def main() -> None:
 
             cap5_chem = merged_dir / f"{stem}_cap{args.cap_per_pair}_chemclass.parquet"
             lib_id_str = stem.split("_lib")[-1]
-            lib_mapping = repo_export / f"lib{lib_id_str}" / "mappings" / f"lib_comp_chem_mapping_lib{lib_id_str}.csv"
+            lib_mapping = (
+                repo_export
+                / f"lib{lib_id_str}"
+                / "mappings"
+                / f"lib_comp_chem_mapping_lib{lib_id_str}.csv"
+            )
             if not lib_mapping.exists():
                 lib_mapping = repo_export / f"lib_comp_chem_mapping_lib{lib_id_str}.csv"
             if not lib_mapping.exists():

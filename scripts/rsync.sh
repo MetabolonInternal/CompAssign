@@ -15,7 +15,7 @@ Arguments:
 Options:
   --dry-run                 Show what would change without modifying files.
   -o, --out <name>          Output subdir under output/ to sync (repeatable).
-                            Example: --out rt_pymc_multilevel_cap100_YYYYMMDD_HHMMSS
+                            Example: --out rt_prod_YYYYMMDD_HHMMSS
 
 Environment overrides:
   REMOTE_ROOT   Remote path (default: joewandy@10.34.1.50:~/CompAssign/)

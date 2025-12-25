@@ -6,7 +6,7 @@ usage() {
 Regenerate RT multilevel plots/ summaries for a run directory.
 
 By default, uses the run directory pointed to by:
-  output/rt_pymc_multilevel_cap100_latest.txt
+  output/rt_prod_latest.txt
 
 Usage:
   ./scripts/plot_rt_multilevel.sh [options]
@@ -72,7 +72,7 @@ if [[ "$CAP" =~ ^[0-9]+$ ]]; then
 fi
 
 if [[ -z "$RUN_DIR" ]]; then
-  LATEST_PATH="${REPO_ROOT}/output/rt_pymc_multilevel_cap100_latest.txt"
+  LATEST_PATH="${REPO_ROOT}/output/rt_prod_latest.txt"
   if [[ ! -f "${LATEST_PATH}" ]]; then
     echo "ERROR: Missing latest pointer: ${LATEST_PATH}" >&2
     echo "Pass --run-dir explicitly, or create the pointer file." >&2

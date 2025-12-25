@@ -1,40 +1,16 @@
 # Tasks
 
-## RT Single-Model PyMC (cap100)
+## RT Ridge Models (cap100)
 
-### Status (collapsed ridge baseline, 2025-12-14)
+### Status (partial pooling ridge, 2025-12-25)
 
-- Baselines to compare:
-  - Lasso: `scripts/pipelines/eval_rt_lasso_baseline_by_species_cluster.py`
-  - Ridge (sklearn, per-group): `scripts/pipelines/train_rt_stage1_coeff_summaries.py`
-- Single PyMC model (collapsed Bayesian ridge; *seen groups focus*):
-  - Train: `scripts/pipelines/train_rt_pymc_collapsed_ridge.py`
-  - Output artifact: `models/stage1_coeff_summaries_posterior.npz` (full `beta_cov` + `sigma2_mean` per group)
-- Unified evaluator for any `Stage1CoeffSummaries`:
-  - `scripts/pipelines/eval_rt_coeff_summaries_by_species_cluster.py`
-- Plot compare-by-cluster:
-  - `scripts/pipelines/compare_rt_models_by_cluster.py`
-
-### Headline results (train cap100; eval realtest; seen groups only)
-
-Results are reproduced by the commands in `docs/models/rt_pymc_collapsed_ridge_report.tex` and copied under:
-- `docs/models/results/rt_pymc_collapsed_ridge_report/lib208_realtest/`
-- `docs/models/results/rt_pymc_collapsed_ridge_report/lib209_realtest/`
-
-- lib208 cap100 → realtest:
-  - Ridge (sklearn) RMSE=0.0093, cov95=0.945 (n=966,482)
-  - PyMC collapsed ridge (MAP, `lambda` fixed) RMSE=0.0093, cov95=0.946 (n=966,482)
-  - Lasso (eslasso) RMSE=0.0151, cov95=0.954 (n=915,327; subset with available eslasso model)
-- lib209 cap100 → realtest:
-  - Ridge (sklearn) RMSE=0.0083, cov95=0.935 (n=13,596,681)
-  - PyMC collapsed ridge (MAP, `lambda` fixed) RMSE=0.0083, cov95=0.963 (n=13,596,681)
-  - Lasso (eslasso) RMSE=0.0094, cov95=0.993 (n=13,301,888; subset with available eslasso model)
-
-### Next actions
-
-- Run full cap100 training (no `--max-train-rows`) and evaluate on realtest (seen groups only).
-- Turn on `--lambda-mode learn` (LogNormal prior) and check whether it improves/harms RMSE + coverage.
-- Add hierarchy/pooling incrementally on top of the collapsed likelihood (e.g., cluster/class/chem effects on coefficient means).
+- Recommended model: PyMC ridge with partial pooling (exports `Stage1CoeffSummaries`).
+- Baselines: PyMC ridge (supercategory) and sklearn ridge (supercategory). Optional legacy lasso baselines exist but are not required.
+- Reproduce (cap100 → realtest):
+  - `./scripts/run_rt_prod.sh --cap 100 --libs 208,209`
+  - `./scripts/run_rt_prod_eval.sh --cap 100 --libs 208,209`
+  - `./scripts/plot_rt_multilevel.sh --cap 100 --libs 208,209`
+- Report: `docs/models/rt_pymc_multilevel_pooling_report.pdf`
 
 ## RT Multi-Level Curate + Supercategory (new)
 
@@ -129,11 +105,12 @@ Should we change the model?
 ## Action Plan (Single Default Profile)
 
 - Script updates (covariate shift runner)
-  - Always use descriptors for the hierarchical model: pass chemistry features from the generator to `HierarchicalRTModel` instead of `None`.
+  - NOTE: covariate shift + descriptor experiments are currently disabled pending a port to the RT ridge pipeline.
+  - TODO: re-implement these studies using `Stage1CoeffSummaries` artifacts (PyMC partial pooling + sklearn baseline).
   - Keep `fixed_runs_per_species_compound=10` for fairness and comparability in this benchmark.
   - Infer species clusters from IS features and feed the inferred labels to BOTH:
-    - the hierarchical model (for species‑intercept pooling), and
-    - the cluster×compound baseline (for its pooling key),
+    - the RT ridge model (for pooling), and
+    - the cluster×compound baseline (for its grouping key),
     replacing oracle cluster ids.
     - Approach: aggregate per‑species mean over `run_covariate_*`, standardise, KMeans with K = `hp["n_clusters"]` and fixed seed.
   - Add a small species‑specific slope heterogeneity in the generator (default `species_gamma_sd=0.1`) to reflect realistic matrix interactions while keeping the problem well‑conditioned.
@@ -166,15 +143,13 @@ Should we change the model?
 
 ## Implementation Notes
 
-- Hier model uses species clusters for intercept pooling and chemistry for slope pooling:
-  - Species intercept prior: `src/compassign/rt/hierarchical.py`
-  - γ slopes pooled by chemistry: `src/compassign/rt/hierarchical.py`
-  - Mean assembly (what is intercept vs slope): `src/compassign/rt/hierarchical.py`
+- Current RT ridge models (Stage-1 coefficient summaries):
+  - Partial pooling: `src/compassign/rt/pymc_partial_pool_ridge.py`
+  - Supercategory baseline: `src/compassign/rt/pymc_supercategory_ridge.py`
+  - Shared collapsed-slope implementation: `src/compassign/rt/ridge_stage1.py`
 
-- Covariate shift runner changes:
-  - Generator call and fixed‑K retained: `scripts/experiments/rt/covariate_shift/assess_covariate_shift_holdout.py:151-160`
-  - Hier instantiation and descriptors enabled: `scripts/experiments/rt/covariate_shift/assess_covariate_shift_holdout.py`
-  - New species‑cluster inference injected for both methods before training.
+- Legacy experiment runners under `scripts/experiments/rt/` that depended on the removed hierarchical RT model are now
+  disabled stubs and must be ported before use.
 
 ## Investigate Species×Chemistry Structure (Future Work)
 

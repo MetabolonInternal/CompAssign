@@ -54,4 +54,6 @@ def test_stage1_coeff_summaries_roundtrip_includes_group_fields(tmp_path: Path) 
 
     assert loaded.group_col == "species"
     assert loaded.supercat_id is not None
-    np.testing.assert_array_equal(np.asarray(loaded.supercat_id, dtype=np.int64), np.asarray([0, 1]))
+    np.testing.assert_array_equal(
+        np.asarray(loaded.supercat_id, dtype=np.int64), np.asarray([0, 1])
+    )

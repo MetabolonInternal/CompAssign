@@ -3,7 +3,7 @@
 Plot and summarize RT multilevel experiment outputs.
 
 This script is intended for analyzing outputs produced by:
-  - scripts/run_rt_pymc_multilevel_cap100_minimal.sh
+  - scripts/run_rt_prod.sh
 
 It reads:
   - per-model JSON summaries:
@@ -72,8 +72,8 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help=(
-            "Run directory under output/ (e.g. output/rt_pymc_multilevel_cap100_YYYYMMDD_HHMMSS). "
-            "If omitted, uses output/rt_pymc_multilevel_cap100_latest.txt."
+            "Run directory under output/ (e.g. output/rt_prod_YYYYMMDD_HHMMSS). "
+            "If omitted, uses output/rt_prod_latest.txt."
         ),
     )
     parser.add_argument(
@@ -135,7 +135,7 @@ def _resolve_run_dir(run_dir: Path | None) -> Path:
         if not p.is_absolute():
             p = (_repo_root() / p).resolve()
         return p
-    latest = _repo_root() / "output" / "rt_pymc_multilevel_cap100_latest.txt"
+    latest = _repo_root() / "output" / "rt_prod_latest.txt"
     if not latest.exists():
         raise SystemExit(f"--run-dir not provided and latest pointer missing: {latest}")
     p = Path(latest.read_text().strip())

@@ -32,7 +32,9 @@ def parse_args() -> argparse.Namespace:
         description="Train a fast ridge RT model on a production RT CSV.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--data-csv", type=Path, required=True, help="Production RT CSV to train on.")
+    parser.add_argument(
+        "--data-csv", type=Path, required=True, help="Production RT CSV to train on."
+    )
     parser.add_argument(
         "--output-dir",
         type=Path,

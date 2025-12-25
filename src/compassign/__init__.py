@@ -8,7 +8,6 @@ in untargeted metabolomics using hierarchical RT modeling and probabilistic matc
 __version__ = "1.0.0"
 __author__ = "Metabolon CompAssign Team"
 
-from .rt import HierarchicalRTModel
 from .utils import load_chemberta_pca20
 from .assignment import AssignmentResults, PeakAssignment, PresencePrior
 from .active_learning import (
@@ -30,7 +29,6 @@ from .active_learning import (
 )
 
 __all__ = [
-    "HierarchicalRTModel",
     "load_chemberta_pca20",
     "PeakAssignment",
     "AssignmentResults",

@@ -211,8 +211,8 @@ def main(args: argparse.Namespace) -> None:
         for run_idx in range(int(args.repeat)):
             run_seed = int(args.seed) + run_idx
             result = time_backend(backend, data=data, seed=run_seed, args=args)
-            ess_rate = result.ess_bulk_min / result.elapsed_s if result.elapsed_s > 0 else float(
-                "nan"
+            ess_rate = (
+                result.ess_bulk_min / result.elapsed_s if result.elapsed_s > 0 else float("nan")
             )
             print(
                 f"{backend:8s}  {run_idx+1:4d}  {result.elapsed_s:6.2f}  "

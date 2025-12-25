@@ -171,19 +171,6 @@ class PeakAssignment:
         """
         logger.info("Computing RT predictions from RT posterior")
 
-        post = trace_rt.posterior
-
-        # Flatten chains and draws
-        def flat(x):
-            v = x.values
-            return v.reshape(-1, *v.shape[2:])
-
-        mu0 = flat(post["mu0"])
-        gamma = flat(post["gamma"])
-        sp = flat(post["species_eff"])
-        cp = flat(post["compound_eff"])
-        sigy = flat(post["sigma_y"])
-
         try:
             run_meta = ensure_run_metadata(
                 run_features,

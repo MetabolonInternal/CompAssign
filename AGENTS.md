@@ -1,8 +1,8 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `src/compassign/`: Core library (e.g., `peak_assignment.py`, `rt_hierarchical.py`, plots, generators).
-- `scripts/`: Runnable entrypoints (e.g., `train.py`, `assess_active_learning.py`, `run_training.sh`, `run_al.sh`, `run_rt_prod.sh`, `compare_rt_models.sh`).
+- `src/compassign/`: Core library (e.g., `peak_assignment.py`, `rt/pymc_partial_pool_ridge.py`, plots, generators).
+- `scripts/`: Runnable entrypoints (e.g., `run_rt_prod.sh`, `run_rt_prod_eval.sh`, `plot_rt_multilevel.sh`).
 - `docs/`: Reference documentation (e.g., Bayesian model specs).
 - `docs/TASKS.md`: Living task plan and next actions for agent work.
 - `output/`: Generated artifacts; ignored by Git. Keep lightweight summaries only.
@@ -10,12 +10,8 @@
 
 ## Build, Test, and Development Commands
 - Environment: `poetry install` and then either `poetry shell` or prefix commands with `poetry run`.
-- Quick training: `./scripts/run_training.sh --quick` (smaller MCMC; aligns with other quick profiles).
-- Full training: `./scripts/run_training.sh` (omit `--quick` for full settings).
-- Active learning: `./scripts/run_al.sh --quick` (end‑to‑end smoke of AL pipeline).
-- RT model comparison: `./scripts/compare_rt_models.sh --quick` (hierarchical vs baseline).
-- Production RT ridge: `./scripts/run_rt_prod.sh --quick` then `./scripts/run_rt_prod_eval.sh` (cap → realtest + plots).
-- Direct usage/help: `python scripts/train.py --help`.
+- Production RT ridge: `./scripts/run_rt_prod.sh` (or `--quick`) then `./scripts/run_rt_prod_eval.sh`.
+- Ridge trainer help: `poetry run python scripts/pipelines/train_rt_pymc_collapsed_ridge.py --help`.
 - Format: `black src scripts` (configured to line length 100).
 - Lint: `flake8 src scripts`.
 

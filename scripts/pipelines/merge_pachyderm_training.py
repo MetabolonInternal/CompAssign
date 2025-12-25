@@ -27,6 +27,7 @@ import sys
 try:
     from tqdm import tqdm
 except ImportError:  # pragma: no cover - optional nicety
+
     def tqdm(it: Iterable, **kwargs):
         return it
 
@@ -46,7 +47,9 @@ def load_train_group(group_dir: Path) -> pd.DataFrame:
         try:
             dfs.append(pd.read_parquet(part))
         except Exception as exc:  # pragma: no cover - defensive path
-            print(f"[merge_pachyderm_training] Skipping corrupt file {part}: {exc}", file=sys.stderr)
+            print(
+                f"[merge_pachyderm_training] Skipping corrupt file {part}: {exc}", file=sys.stderr
+            )
             continue
     if not dfs:
         return pd.DataFrame()
@@ -224,7 +227,7 @@ def merge_and_write(
             out_dir = out_root / f"species_matrix_type={sm}" / f"lib_id={lib_id}"
             out_dir.mkdir(parents=True, exist_ok=True)
             for i in range(0, len(shard), chunk_size):
-                chunk = shard.iloc[i:i + chunk_size]
+                chunk = shard.iloc[i : i + chunk_size]
                 chunk.to_parquet(
                     out_dir / f"{group_name}_{i // chunk_size}.parquet",
                     index=False,

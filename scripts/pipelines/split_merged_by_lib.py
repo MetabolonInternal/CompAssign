@@ -17,7 +17,6 @@ import argparse
 from pathlib import Path
 from typing import Dict
 
-import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -69,7 +68,9 @@ def split_by_lib(src: Path, out_dir: Path) -> None:
 
     for lib_val, writer in writers.items():
         writer.close()
-        print(f"[split] Closed writer for lib_id={int(lib_val)} with {counts.get(lib_val, 0):,} rows")
+        print(
+            f"[split] Closed writer for lib_id={int(lib_val)} with {counts.get(lib_val, 0):,} rows"
+        )
 
 
 def main() -> None:
@@ -83,4 +84,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -16,7 +16,9 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 
-def summarize(path: Path, caps: Tuple[int, ...] = (10, 20, 50, 100)) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[int, int]]:
+def summarize(
+    path: Path, caps: Tuple[int, ...] = (10, 20, 50, 100)
+) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[int, int]]:
     """
     Compute exact species_matrix_type × comp_id combinations and row counts,
     and total rows retained under different per-combination caps.
@@ -62,7 +64,9 @@ def summarize(path: Path, caps: Tuple[int, ...] = (10, 20, 50, 100)) -> Tuple[pd
 
 def main(paths: list[str]) -> None:
     if not paths:
-        raise SystemExit("Usage: summarize_species_compounds.py <input.parquet> [<input2.parquet> ...]")
+        raise SystemExit(
+            "Usage: summarize_species_compounds.py <input.parquet> [<input2.parquet> ...]"
+        )
     for p_str in paths:
         path = Path(p_str)
         if not path.exists():
