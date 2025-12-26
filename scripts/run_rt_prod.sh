@@ -5,8 +5,7 @@ set -euo pipefail
 #
 # This script trains:
 #   1) PyMC ridge (partial pooling; recommended)
-#   2) PyMC ridge (supercategory; fast fallback)
-#   3) sklearn ridge (supercategory; baseline comparison)
+#   2) sklearn ridge (supercategory; baseline comparison)
 #
 # The output directory is a "run dir" compatible with:
 #   ./scripts/plot_rt_multilevel.sh
@@ -25,6 +24,7 @@ This writes a run directory with a consistent structure:
   <run-dir>/lib<lib>/<cap>/sklearn_ridge_species_cluster/stage1_coeff_summaries.npz
 
 Defaults are chosen to match the current report (cap100 -> realtest).
+By default, this runs train + realtest eval + plots, syncs report images, and rebuilds the PDF.
 
 Usage:
   ./scripts/run_rt_prod.sh [options]
@@ -34,6 +34,15 @@ Options:
   --cap <capN|N>         Training cap label (default: cap100)
   --libs <ids>           Comma-separated lib ids (default: 208,209)
   --seed <int>           Random seed (default: 42)
+  --partial-alpha-prior-mode <mode>
+                         Compound prior mode for the partial pooling model:
+                         iid|chem_linear|chem_interaction (default: chem_linear)
+  --chem-embeddings-path <path>
+                         ChemBERTa embedding parquet (used when partial-alpha-prior-mode is chem_*)
+  --theta-alpha-prior-sigma <float>
+                         Prior sigma for theta_alpha (chem_* modes; default: 1.0)
+  --no-eval              Train only (skip realtest evaluation, plots, and PDF rebuild)
+  --no-build-pdf         After training/eval, skip rebuilding docs/models/rt_pymc_multilevel_pooling_report.pdf
   --quick                Reduced ADVI steps for a smoke run
   --skip-existing        Skip models with existing artifacts (default)
   --no-skip-existing     Retrain even if artifacts exist
@@ -52,6 +61,12 @@ SEED="42"
 QUICK="0"
 SKIP_EXISTING="1"
 TRAIN_SKLEARN="1"
+PARTIAL_ALPHA_PRIOR_MODE="chem_linear"
+CHEM_EMBEDDINGS_PATH="resources/metabolites/embeddings_chemberta_pca20.parquet"
+THETA_ALPHA_PRIOR_SIGMA="1.0"
+# Default: run the full report-oriented prod pipeline.
+DO_EVAL="1"
+BUILD_PDF="1"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -71,8 +86,29 @@ while [[ $# -gt 0 ]]; do
       SEED="${2:-}"
       shift 2
       ;;
+    --partial-alpha-prior-mode)
+      PARTIAL_ALPHA_PRIOR_MODE="${2:-}"
+      shift 2
+      ;;
+    --chem-embeddings-path)
+      CHEM_EMBEDDINGS_PATH="${2:-}"
+      shift 2
+      ;;
+    --theta-alpha-prior-sigma)
+      THETA_ALPHA_PRIOR_SIGMA="${2:-}"
+      shift 2
+      ;;
     --quick)
       QUICK="1"
+      shift 1
+      ;;
+    --no-eval)
+      DO_EVAL="0"
+      BUILD_PDF="0"
+      shift 1
+      ;;
+    --no-build-pdf)
+      BUILD_PDF="0"
       shift 1
       ;;
     --skip-existing)
@@ -116,10 +152,8 @@ echo "${RUN_DIR}" > "${REPO_ROOT}/output/rt_prod_latest.txt"
 
 ADVI_DRAWS="50"
 ADVI_LOG_EVERY="1000"
-ADVI_STEPS_SUPERCAT="5000"
 ADVI_STEPS_PARTIAL="10000"
 if [[ "${QUICK}" == "1" ]]; then
-  ADVI_STEPS_SUPERCAT="2000"
   ADVI_STEPS_PARTIAL="3000"
 fi
 
@@ -151,7 +185,7 @@ for lib in "${LIB_ARR[@]}"; do
     exit 2
   fi
 
-  echo "[train] lib${lib} ${CAP}"
+echo "[train] lib${lib} ${CAP}"
 
   # 1) Partial pooling (recommended).
   PARTIAL_OUT="${RUN_DIR}/lib${lib}/${CAP}/features_none/pymc_pooled_species_comp_hier_supercat_cluster_supercat"
@@ -168,37 +202,19 @@ for lib in "${LIB_ARR[@]}"; do
         --seed "${SEED}" \
         --include-es-all \
         --lambda-slopes "${LAMBDA_SLOPES}" \
+        --alpha-prior-mode "${PARTIAL_ALPHA_PRIOR_MODE}" \
+        --chem-embeddings-path "${CHEM_EMBEDDINGS_PATH}" \
+        --theta-alpha-prior-sigma "${THETA_ALPHA_PRIOR_SIGMA}" \
         --method advi \
         --advi-steps "${ADVI_STEPS_PARTIAL}" \
         --advi-log-every "${ADVI_LOG_EVERY}" \
         --advi-draws "${ADVI_DRAWS}"
-  fi
+	  fi
 
-  # 2) Supercategory collapsed ridge (fast fallback).
-  SUPERCAT_OUT="${RUN_DIR}/lib${lib}/${CAP}/features_none/pymc_collapsed_group_species_cluster"
-  SUPERCAT_COEFF="${SUPERCAT_OUT}/models/stage1_coeff_summaries_posterior.npz"
-  SUPERCAT_LOG="${RUN_DIR}/logs/lib${lib}_${CAP}_none_pymc_collapsed_group_species_cluster.train.log"
-  if [[ "${SKIP_EXISTING}" == "1" && -f "${SUPERCAT_COEFF}" ]]; then
-    echo "[train] Skip supercategory PyMC (exists): ${SUPERCAT_COEFF}"
-  else
-    run_cmd "${SUPERCAT_LOG}" \
-      poetry run python -u scripts/pipelines/train_rt_pymc_collapsed_ridge.py \
-        --data-csv "${TRAIN_CSV}" \
-        --output-dir "${SUPERCAT_OUT}" \
-        --model supercategory \
-        --seed "${SEED}" \
-        --include-es-all \
-        --lambda-slopes "${LAMBDA_SLOPES}" \
-        --method advi \
-        --advi-steps "${ADVI_STEPS_SUPERCAT}" \
-        --advi-log-every "${ADVI_LOG_EVERY}" \
-        --advi-draws "${ADVI_DRAWS}"
-  fi
-
-  # 3) sklearn ridge baseline (optional).
-  if [[ "${TRAIN_SKLEARN}" == "1" ]]; then
-    SK_OUT="${RUN_DIR}/lib${lib}/${CAP}/sklearn_ridge_species_cluster"
-    SK_COEFF="${SK_OUT}/stage1_coeff_summaries.npz"
+	  # 2) sklearn ridge baseline (optional).
+	  if [[ "${TRAIN_SKLEARN}" == "1" ]]; then
+	    SK_OUT="${RUN_DIR}/lib${lib}/${CAP}/sklearn_ridge_species_cluster"
+	    SK_COEFF="${SK_OUT}/stage1_coeff_summaries.npz"
     SK_LOG="${RUN_DIR}/logs/lib${lib}_${CAP}_sklearn_ridge_species_cluster.train.log"
     if [[ "${SKIP_EXISTING}" == "1" && -f "${SK_COEFF}" ]]; then
       echo "[train] Skip sklearn ridge (exists): ${SK_COEFF}"
@@ -218,4 +234,24 @@ for lib in "${LIB_ARR[@]}"; do
   fi
 done
 
-echo "[train] Done. Next: ./scripts/run_rt_prod_eval.sh --run-dir ${RUN_DIR}"
+if [[ "${DO_EVAL}" == "1" ]]; then
+  echo "[train] Evaluating + plotting (realtest)"
+  EVAL_CMD=(
+    "${REPO_ROOT}/scripts/run_rt_prod_eval.sh"
+    --run-dir "${RUN_DIR}"
+    --cap "${CAP}"
+    --libs "${LIBS}"
+    --sync-report-images
+  )
+  if [[ "${SKIP_EXISTING}" == "1" ]]; then
+    EVAL_CMD+=(--skip-existing)
+  else
+    EVAL_CMD+=(--no-skip-existing)
+  fi
+  if [[ "${BUILD_PDF}" == "1" ]]; then
+    EVAL_CMD+=(--build-pdf)
+  fi
+  "${EVAL_CMD[@]}"
+fi
+
+echo "[train] Done. Run dir: ${RUN_DIR}"

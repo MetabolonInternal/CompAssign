@@ -28,6 +28,8 @@ Options:
   --skip-existing        Skip evals with existing JSON (default)
   --no-skip-existing     Re-run evals even if JSON exists
   --no-plots             Skip plot regeneration
+  --sync-report-images   Copy *_full.png plots into docs/models/images/rt_pymc_multilevel_pooling_report/
+  --build-pdf            Rebuild docs/models/rt_pymc_multilevel_pooling_report.pdf (requires latexmk)
   -h, --help             Show this help text
 EOF
 }
@@ -42,6 +44,8 @@ CHUNK_SIZE="200000"
 LOG_EVERY_CHUNKS="5"
 SKIP_EXISTING="1"
 DO_PLOTS="1"
+SYNC_REPORT_IMAGES="0"
+BUILD_PDF="0"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -75,6 +79,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-plots)
       DO_PLOTS="0"
+      shift 1
+      ;;
+    --sync-report-images)
+      SYNC_REPORT_IMAGES="1"
+      shift 1
+      ;;
+    --build-pdf)
+      BUILD_PDF="1"
       shift 1
       ;;
     -h|--help)
@@ -146,6 +158,33 @@ eval_model() {
       --label realtest
 }
 
+eval_lasso_supercat() {
+  local lib_id="$1"
+  local output_dir="$2"
+  local test_csv="$3"
+  local support_map_csv="$4"
+  local log_path="$5"
+
+  local out_json="${output_dir}/results/rt_eval_lasso_realtest.json"
+  if [[ "${SKIP_EXISTING}" == "1" && -f "${out_json}" ]]; then
+    echo "[eval] Skip (exists): ${out_json}"
+    return 0
+  fi
+
+  local -a cmd=(
+    poetry run python -u scripts/pipelines/eval_rt_lasso_baseline_by_species_cluster.py
+      --output-dir "${output_dir}"
+      --lib-id "${lib_id}"
+      --test-csv "${test_csv}"
+      --chunk-size "${CHUNK_SIZE}"
+      --label realtest
+  )
+  if [[ -n "${support_map_csv}" && -f "${support_map_csv}" ]]; then
+    cmd+=(--support-map-csv "${support_map_csv}")
+  fi
+  run_cmd "${log_path}" "${cmd[@]}"
+}
+
 IFS=',' read -r -a LIB_ARR <<< "${LIBS}"
 for lib in "${LIB_ARR[@]}"; do
   lib="$(echo "${lib}" | tr -d '[:space:]')"
@@ -173,24 +212,49 @@ for lib in "${LIB_ARR[@]}"; do
     echo "[eval] Skip missing partial coeff: ${PARTIAL_COEFF}"
   fi
 
-  SUPERCAT_COEFF="${RUN_DIR}/lib${lib}/${CAP}/features_none/pymc_collapsed_group_species_cluster/models/stage1_coeff_summaries_posterior.npz"
-  if [[ -f "${SUPERCAT_COEFF}" ]]; then
-    eval_model "${lib}" "${SUPERCAT_COEFF}" "${TEST_CSV}" \
-      "${RUN_DIR}/logs/lib${lib}_${CAP}_none_pymc_collapsed_group_species_cluster.eval.log"
-  else
-    echo "[eval] Skip missing supercat coeff: ${SUPERCAT_COEFF}"
-  fi
-
   SK_COEFF="${RUN_DIR}/lib${lib}/${CAP}/sklearn_ridge_species_cluster/stage1_coeff_summaries.npz"
   if [[ -f "${SK_COEFF}" ]]; then
     eval_model "${lib}" "${SK_COEFF}" "${TEST_CSV}" \
       "${RUN_DIR}/logs/lib${lib}_${CAP}_sklearn_ridge_species_cluster.eval.log"
   fi
+
+  # Lasso supercategory baseline (external eslasso models).
+  LASSO_OUT="${RUN_DIR}/lib${lib}/${CAP}/lasso_eslasso_species_cluster"
+  SUPPORT_MAP="${RUN_DIR}/lib${lib}/${CAP}/sklearn_ridge_species_cluster/results/rt_eval_coeff_summaries_by_group_realtest.csv"
+  eval_lasso_supercat "${lib}" "${LASSO_OUT}" "${TEST_CSV}" "${SUPPORT_MAP}" \
+    "${RUN_DIR}/logs/lib${lib}_${CAP}_lasso_eslasso_species_cluster.eval.log"
 done
 
 if [[ "${DO_PLOTS}" == "1" ]]; then
   echo "[eval] Plotting (global + by support + by species_cluster)"
   ./scripts/plot_rt_multilevel.sh --run-dir "${RUN_DIR}" --cap "${CAP}" --libs "${LIBS}"
+fi
+
+if [[ "${SYNC_REPORT_IMAGES}" == "1" ]]; then
+  echo "[eval] Syncing report plot images"
+  REPORT_IMG_DIR="${REPO_ROOT}/docs/models/images/rt_pymc_multilevel_pooling_report"
+  mkdir -p "${REPORT_IMG_DIR}"
+  PLOTS_DIR="${RUN_DIR}/plots"
+  if [[ ! -d "${PLOTS_DIR}" ]]; then
+    echo "ERROR: Missing plots dir (run with plots enabled): ${PLOTS_DIR}" >&2
+    exit 2
+  fi
+  for lib in "${LIB_ARR[@]}"; do
+    lib="$(echo "${lib}" | tr -d '[:space:]')"
+    for stem in global_comparison by_support_bin by_species_cluster; do
+      src="${PLOTS_DIR}/lib${lib}_${stem}_anchor_none_full.png"
+      if [[ ! -f "${src}" ]]; then
+        echo "ERROR: Missing plot: ${src}" >&2
+        exit 2
+      fi
+      cp -f "${src}" "${REPORT_IMG_DIR}/"
+    done
+  done
+fi
+
+if [[ "${BUILD_PDF}" == "1" ]]; then
+  echo "[eval] Building report PDF"
+  (cd "${REPO_ROOT}/docs/models" && latexmk -xelatex -interaction=nonstopmode rt_pymc_multilevel_pooling_report.tex)
 fi
 
 echo "[eval] Done."

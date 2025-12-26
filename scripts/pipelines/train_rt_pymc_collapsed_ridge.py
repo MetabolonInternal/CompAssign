@@ -79,6 +79,30 @@ def parse_args() -> argparse.Namespace:
         help="HalfNormal prior scale for sigma_y.",
     )
     parser.add_argument(
+        "--alpha-prior-mode",
+        type=str,
+        choices=["iid", "chem_linear", "chem_interaction"],
+        default="iid",
+        help=(
+            "Compound prior mode for the partial_pool model. " "Ignored for --model supercategory."
+        ),
+    )
+    parser.add_argument(
+        "--chem-embeddings-path",
+        type=Path,
+        default=Path("resources/metabolites/embeddings_chemberta_pca20.parquet"),
+        help=(
+            "ChemBERTa PCA embedding parquet. Required when --alpha-prior-mode is chem_linear/"
+            "chem_interaction."
+        ),
+    )
+    parser.add_argument(
+        "--theta-alpha-prior-sigma",
+        type=float,
+        default=1.0,
+        help="Prior sigma for theta_alpha when --alpha-prior-mode is chem_*.",
+    )
+    parser.add_argument(
         "--method",
         type=str,
         choices=["advi", "map"],
@@ -107,6 +131,10 @@ def main() -> None:
 
     model = str(args.model)
     method = str(args.method)
+    alpha_prior_mode = str(args.alpha_prior_mode)
+    chem_embeddings_path = None
+    if model == "partial_pool" and alpha_prior_mode != "iid":
+        chem_embeddings_path = Path(args.chem_embeddings_path)
     if args.advi_steps is None:
         args.advi_steps = 5000 if model == "supercategory" else 10_000
 
@@ -137,6 +165,9 @@ def main() -> None:
             feature_center="global",
             lambda_slopes=float(args.lambda_slopes),
             sigma_y_prior=float(args.sigma_y_prior),
+            alpha_prior_mode=alpha_prior_mode,  # type: ignore[arg-type]
+            chem_embeddings_path=chem_embeddings_path,
+            theta_alpha_prior_sigma=float(args.theta_alpha_prior_sigma),
             method=method,  # type: ignore[arg-type]
             advi_steps=int(args.advi_steps),
             advi_log_every=int(args.advi_log_every),

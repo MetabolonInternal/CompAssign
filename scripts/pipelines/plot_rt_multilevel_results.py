@@ -101,16 +101,15 @@ def parse_args() -> argparse.Namespace:
         "--models",
         type=str,
         default=(
-            "pymc_collapsed_group_species_cluster@none,"
+            "sklearn_ridge_species_cluster,"
             "pymc_pooled_species_comp_hier_supercat_cluster_supercat@none,"
-            "lasso_eslasso_species_cluster,"
-            "lasso_eslasso_local"
+            "lasso_eslasso_species_cluster"
         ),
         help=(
             "Comma-separated model directory names to compare in plots. "
             "Optionally specify a per-model anchor override as '<model>@<anchor>' (e.g. "
             "'pymc_collapsed_group_species_cluster@poly2'). "
-            "Defaults to PyMC pooling variants plus Sally eslasso baselines (supercategory + local_models)."
+            "Defaults to the report baselines (sklearn ridge supercategory + partial pooling + lasso supercategory)."
         ),
     )
     parser.add_argument(
@@ -219,6 +218,61 @@ def _safe_model_label(model_dir_name: str) -> str:
         "lasso_eslasso_local": "Lasso (species)",
     }
     return mapping.get(model_dir_name, model_dir_name)
+
+
+def _format_alpha_prior_mode(mode: str) -> str:
+    mode = str(mode).strip()
+    if not mode:
+        return ""
+    return mode.replace("_", "-")
+
+
+def _build_model_labels(
+    *,
+    run_dir: Path,
+    libs: Sequence[int],
+    cap: str,
+    default_anchor: str,
+    model_specs: Sequence[ModelSpec],
+) -> dict[str, str]:
+    labels: dict[str, str] = {spec.display: _safe_model_label(spec.display) for spec in model_specs}
+
+    # Enrich partial pooling label with the alpha prior mode when available.
+    for spec in model_specs:
+        if spec.model != "pymc_pooled_species_comp_hier_supercat_cluster_supercat":
+            continue
+        alpha_modes: set[str] = set()
+        for lib in libs:
+            anchor = str(spec.anchor or default_anchor)
+            config_path = (
+                run_dir
+                / f"lib{int(lib)}"
+                / str(cap)
+                / f"features_{anchor}"
+                / str(spec.model)
+                / "config.json"
+            )
+            if not config_path.exists():
+                continue
+            try:
+                d = json.loads(config_path.read_text())
+            except Exception:
+                continue
+            mode = _format_alpha_prior_mode(str(d.get("alpha_prior_mode", "")))
+            if mode:
+                alpha_modes.add(mode)
+
+        if len(alpha_modes) == 1:
+            mode = next(iter(alpha_modes))
+            labels[spec.display] = f"Ridge (partial pooling, {mode})"
+        elif len(alpha_modes) > 1:
+            LOGGER.warning(
+                "Multiple alpha_prior_mode values for %s: %s; leaving generic label",
+                spec.model,
+                sorted(alpha_modes),
+            )
+
+    return labels
 
 
 def _tag_suffix(tag: str | None) -> str:
@@ -735,6 +789,7 @@ def _plot_per_lib_cluster_panels(
     out_dir: Path,
     libs: Sequence[int],
     models: Sequence[str],
+    model_labels: dict[str, str],
     cap: str,
     anchor: str,
     tag_suffix: str = "",
@@ -802,7 +857,7 @@ def _plot_per_lib_cluster_panels(
                     x + (i - (len(order_models) - 1) / 2) * width,
                     y,
                     width=width,
-                    label=_safe_model_label(model),
+                    label=model_labels.get(model, _safe_model_label(model)),
                     color=color_map.get(model, None),
                     alpha=0.85,
                 )
@@ -840,6 +895,7 @@ def _plot_support_curves(
     out_dir: Path,
     libs: Sequence[int],
     models: Sequence[str],
+    model_labels: dict[str, str],
     anchor: str,
     cap: str,
     tag_suffix: str = "",
@@ -902,7 +958,7 @@ def _plot_support_curves(
                     x + (i - (n_models - 1) / 2) * width,
                     y,
                     width=width,
-                    label=_safe_model_label(model),
+                    label=model_labels.get(model, _safe_model_label(model)),
                     color=color_map.get(model, None),
                     alpha=0.85,
                 )
@@ -942,6 +998,7 @@ def _plot_global_comparison(
     out_dir: Path,
     libs: Sequence[int],
     models: Sequence[str],
+    model_labels: dict[str, str],
     cap: str,
     anchor: str,
     tag_suffix: str = "",
@@ -1001,7 +1058,7 @@ def _plot_global_comparison(
         axes_flat = axes.reshape(-1).tolist()
 
         x = np.arange(len(order_models))
-        labels = [_safe_model_label(m) for m in order_models]
+        labels = [model_labels.get(m, _safe_model_label(m)) for m in order_models]
         colors = [color_map.get(m, None) for m in order_models]
 
         for ax, (col, ylabel, kind) in zip(axes_flat[:n_metrics], metrics, strict=True):
@@ -1031,55 +1088,6 @@ def _plot_global_comparison(
         LOGGER.info("Wrote %s", out_path)
 
 
-def _print_pooling_summary(
-    cat_df: pd.DataFrame, *, default_model: str, baseline_model: str
-) -> None:
-    required = {"lib", "model", "category", "rmse", "cov95", "interval_width_mean"}
-    missing = required - set(cat_df.columns)
-    if missing:
-        LOGGER.warning("Category DF missing columns %s; skipping pooling summary", sorted(missing))
-        return
-    if "pymc_collapsed_group_species" not in set(cat_df["model"].astype(str)):
-        LOGGER.warning("No 'pymc_collapsed_group_species' rows in category summary; skipping")
-        return
-
-    def fmt(v: float) -> str:
-        return f"{v:.6f}"
-
-    for lib in sorted(set(cat_df["lib"].astype(int))):
-        base = cat_df[cat_df["lib"] == lib].copy()
-        base = base.set_index(["model", "category"])
-        print(f"\n=== lib{lib} category comparison ===")
-        for category in ["blood", "urine", "cells", "other"]:
-            key_np = ("pymc_collapsed_group_species", category)
-            if key_np not in base.index:
-                continue
-            rmse_np = float(base.loc[key_np, "rmse"])
-            cov_np = float(base.loc[key_np, "cov95"])
-            width_np = float(base.loc[key_np, "interval_width_mean"])
-
-            line = (
-                f"{category:<5} no_pool rmse={fmt(rmse_np)} cov95={cov_np:.3f} width={width_np:.5f}"
-            )
-            if (default_model, category) in base.index:
-                rmse_d = float(base.loc[(default_model, category), "rmse"])
-                cov_d = float(base.loc[(default_model, category), "cov95"])
-                width_d = float(base.loc[(default_model, category), "interval_width_mean"])
-                line += (
-                    f" | default rmse={fmt(rmse_d)} ({100 * (rmse_d / rmse_np - 1):+.2f}%)"
-                    f" cov95={cov_d:.3f} width={width_d:.5f}"
-                )
-            if (baseline_model, category) in base.index:
-                rmse_b = float(base.loc[(baseline_model, category), "rmse"])
-                cov_b = float(base.loc[(baseline_model, category), "cov95"])
-                width_b = float(base.loc[(baseline_model, category), "interval_width_mean"])
-                line += (
-                    f" | cluster rmse={fmt(rmse_b)} ({100 * (rmse_b / rmse_np - 1):+.2f}%)"
-                    f" cov95={cov_b:.3f} width={width_b:.5f}"
-                )
-            print(line)
-
-
 def main() -> None:
     _setup_logging()
     args = parse_args()
@@ -1098,6 +1106,13 @@ def main() -> None:
     out_dir = args.out_dir or (run_dir / "plots")
     out_dir.mkdir(parents=True, exist_ok=True)
     tag_suffix = _tag_suffix(args.tag)
+    model_labels = _build_model_labels(
+        run_dir=run_dir,
+        libs=libs,
+        cap=cap,
+        default_anchor=default_anchor,
+        model_specs=model_specs,
+    )
 
     LOGGER.info("RUN_DIR=%s", run_dir)
     LOGGER.info("OUT_DIR=%s", out_dir)
@@ -1112,7 +1127,11 @@ def main() -> None:
     if not lasso_global.empty:
         global_df = pd.concat([global_df, lasso_global], ignore_index=True)
     global_df = _attach_train_times(global_df=global_df, run_dir=run_dir)
-    global_df["model_label"] = global_df["model"].astype(str).map(_safe_model_label)
+    global_df["model_label"] = (
+        global_df["model"]
+        .astype(str)
+        .map(lambda m: model_labels.get(str(m), _safe_model_label(str(m))))
+    )
     global_metrics_csv = out_dir / f"global_metrics{tag_suffix}.csv"
     global_df.to_csv(global_metrics_csv, index=False)
     LOGGER.info("Wrote %s", global_metrics_csv)
@@ -1142,7 +1161,11 @@ def main() -> None:
         else global_df.iloc[:0].copy()
     )
     if not global_selected.empty:
-        global_selected["model_label"] = global_selected["model"].astype(str).map(_safe_model_label)
+        global_selected["model_label"] = (
+            global_selected["model"]
+            .astype(str)
+            .map(lambda m: model_labels.get(str(m), _safe_model_label(str(m))))
+        )
     global_selected_csv = out_dir / f"global_metrics_selected{tag_suffix}.csv"
     global_selected.to_csv(global_selected_csv, index=False)
     LOGGER.info("Wrote %s", global_selected_csv)
@@ -1161,6 +1184,7 @@ def main() -> None:
         out_dir=out_dir,
         libs=libs,
         models=models,
+        model_labels=model_labels,
         cap=cap,
         anchor=anchor_label,
         tag_suffix=tag_suffix,
@@ -1202,6 +1226,7 @@ def main() -> None:
         out_dir=out_dir,
         libs=libs,
         models=models,
+        model_labels=model_labels,
         anchor=anchor_label,
         cap=cap,
         tag_suffix=tag_suffix,
@@ -1212,15 +1237,10 @@ def main() -> None:
         out_dir=out_dir,
         libs=libs,
         models=models,
+        model_labels=model_labels,
         cap=cap,
         anchor=anchor_label,
         tag_suffix=tag_suffix,
-    )
-
-    _print_pooling_summary(
-        cat_df,
-        default_model="pymc_pooled_species_comp_hier_supercat",
-        baseline_model="pymc_collapsed_group_species_cluster",
     )
 
 

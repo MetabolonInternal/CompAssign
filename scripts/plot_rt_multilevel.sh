@@ -19,9 +19,7 @@ Options:
   --dry-run          Print the command and exit.
   -h, --help         Show this help text.
 
-This generates BOTH plot sets into the same output directory using filename tags:
-  - tag=full       (candidates + lasso baselines)
-  - tag=candidates (candidates only)
+This generates the report plot set (tag=full) into the output directory.
 EOF
 }
 
@@ -88,12 +86,11 @@ if [[ ! -d "${RUN_DIR}" ]]; then
   exit 2
 fi
 
-CANDIDATE_MODELS=(
-  "pymc_collapsed_group_species_cluster@none"
+MODELS=(
   "sklearn_ridge_species_cluster"
   "pymc_pooled_species_comp_hier_supercat_cluster_supercat@none"
+  "lasso_eslasso_species_cluster"
 )
-FULL_MODELS=("${CANDIDATE_MODELS[@]}" "lasso_eslasso_species_cluster" "lasso_eslasso_local")
 
 if [[ -z "${OUT_DIR}" ]]; then
   OUT_DIR="${RUN_DIR}/plots"
@@ -130,15 +127,12 @@ mk_cmd() {
   printf "%q " "${cmd[@]}"
 }
 
-FULL_MODELS_CSV="$(IFS=,; echo "${FULL_MODELS[*]}")"
-CANDIDATE_MODELS_CSV="$(IFS=,; echo "${CANDIDATE_MODELS[*]}")"
+MODELS_CSV="$(IFS=,; echo "${MODELS[*]}")"
 
-echo "[plot] FULL_MODELS=${FULL_MODELS_CSV}"
-echo "[plot] CANDIDATE_MODELS=${CANDIDATE_MODELS_CSV}"
+echo "[plot] MODELS=${MODELS_CSV}"
 
 if [[ "${DRY_RUN}" -eq 1 ]]; then
-  echo "[plot] DRY_RUN CMD (full): $(mk_cmd full "${FULL_MODELS_CSV}")"
-  echo "[plot] DRY_RUN CMD (candidates): $(mk_cmd candidates "${CANDIDATE_MODELS_CSV}")"
+  echo "[plot] DRY_RUN CMD: $(mk_cmd full "${MODELS_CSV}")"
   exit 0
 fi
 
@@ -150,24 +144,10 @@ CMD_FULL=(
   --out-dir "${OUT_DIR}"
   --cap "${CAP}"
   --anchor none
-  --models "${FULL_MODELS_CSV}"
+  --models "${MODELS_CSV}"
   --tag full
 )
 if [[ -n "${LIBS}" ]]; then
   CMD_FULL+=(--libs "${LIBS}")
 fi
 "${CMD_FULL[@]}"
-
-CMD_CANDIDATES=(
-  poetry run python -u scripts/pipelines/plot_rt_multilevel_results.py
-  --run-dir "${RUN_DIR}"
-  --out-dir "${OUT_DIR}"
-  --cap "${CAP}"
-  --anchor none
-  --models "${CANDIDATE_MODELS_CSV}"
-  --tag candidates
-)
-if [[ -n "${LIBS}" ]]; then
-  CMD_CANDIDATES+=(--libs "${LIBS}")
-fi
-"${CMD_CANDIDATES[@]}"
