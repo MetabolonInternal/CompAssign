@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
-import scripts.aggregate_al_results as aggregate
+import compassign.active_learning.aggregate_results as aggregate
 
 
 def test_aggregate_al_results_writes_outputs(tmp_path: Path, monkeypatch) -> None:

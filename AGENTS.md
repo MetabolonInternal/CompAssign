@@ -2,7 +2,8 @@
 
 ## Project Structure & Module Organization
 - `src/compassign/`: Core library (e.g., `peak_assignment.py`, `rt/pymc_partial_pool_ridge.py`, plots, generators).
-- `scripts/`: Runnable entrypoints (e.g., `run_rt_prod.sh`, `run_rt_prod_eval.sh`, `plot_rt_multilevel.sh`).
+- `src/compassign/rt/`: Production RT pipeline shell entrypoints (`prep.sh`, `train.sh`, `eval.sh`).
+- `scripts/`: Auxiliary scripts (e.g., `data_prep/`, `remote/`, `bench/`).
 - `docs/`: Reference documentation (e.g., Bayesian model specs).
 - `docs/TASKS.md`: Living task plan and next actions for agent work.
 - `output/`: Generated artifacts; ignored by Git. Keep lightweight summaries only.
@@ -10,8 +11,8 @@
 
 ## Build, Test, and Development Commands
 - Environment: `poetry install` and then either `poetry shell` or prefix commands with `poetry run`.
-- Production RT ridge: `./scripts/run_rt_prod.sh` (or `--quick`) then `./scripts/run_rt_prod_eval.sh`.
-- Ridge trainer help: `poetry run python scripts/pipelines/train_rt_pymc_collapsed_ridge.py --help`.
+- Production RT ridge: `./src/compassign/rt/train.sh` then `./src/compassign/rt/eval.sh`.
+- Ridge trainer help: `poetry run python -m compassign.rt.train_rt_pymc_collapsed_ridge --help`.
 - Format: `black src scripts` (configured to line length 100).
 - Lint: `flake8 src scripts`.
 

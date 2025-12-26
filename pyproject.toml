@@ -49,6 +49,3 @@ target-version = ['py311']
 [tool.flake8]
 max-line-length = 100
 extend-ignore = ["E203", "W503"]
-
-[tool.poetry.scripts]
-train = "scripts.train:main"

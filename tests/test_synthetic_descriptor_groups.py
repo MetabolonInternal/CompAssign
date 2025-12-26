@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from scripts.create_synthetic_data import create_metabolomics_data
+from compassign.generators.create_synthetic_data import create_metabolomics_data
 
 
 def test_generator_outputs_descriptor_groups_and_budgets():

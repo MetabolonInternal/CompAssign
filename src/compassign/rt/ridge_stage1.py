@@ -321,6 +321,95 @@ class ChemHierBackoffSummaries:
         )
 
 
+@dataclass(frozen=True)
+class PartialPoolBackoffSummaries:
+    """Backoff parameters for the partial-pooling ridge model (unseen species/compounds).
+
+    This artifact stores the *hierarchy-level* posterior means needed to construct reasonable
+    coefficients for groups that are not present in `Stage1CoeffSummaries.group_keys`, e.g.:
+      - unseen (species, comp_id) pairs,
+      - a new species nested in a known species_cluster,
+      - an unseen comp_id with a known compound_class.
+
+    It is intentionally small and does not store per-group sufficient stats.
+    """
+
+    feature_names: Tuple[str, ...]
+    cluster_ids: np.ndarray  # (C,) int64 unique species ids (sorted)
+    cluster_supercat_id: np.ndarray  # (C,) int64 parent species_cluster id per species
+    comp_ids: np.ndarray  # (M,) int64 unique comp_id values (sorted)
+    comp_chem_id: np.ndarray  # (M,) int64 chem_id per comp_id (or -1)
+    comp_class: np.ndarray  # (M,) int64 compound_class id per comp_id (or -1)
+    t0: float  # global intercept baseline
+    mu_cluster: np.ndarray  # (C,) float species offsets (mean-zero)
+    alpha_comp: np.ndarray  # (M,) float compound offsets (mean-zero)
+    w_cluster: np.ndarray  # (C, P) float slope heads per species
+    tau_b: float  # prior sd for per-(species, comp_id) intercepts
+    sigma2: float  # noise variance (shared)
+    lambda_slopes: float  # ridge precision for slopes (shared scalar)
+    # Single-model chemistry regression for alpha_comp backoff (unseen compounds).
+    alpha_z_center: np.ndarray  # (D,) float; mean chem embedding used for centering
+    alpha_theta: np.ndarray  # (D,) float; embedding->alpha linear weights
+    tau_comp: float  # sd for per-compound residual offsets (delta_comp)
+
+    def save_npz(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload: dict[str, np.ndarray] = {
+            "feature_names": np.asarray(self.feature_names, dtype=object),
+            "cluster_ids": np.asarray(self.cluster_ids, dtype=np.int64),
+            "cluster_supercat_id": np.asarray(self.cluster_supercat_id, dtype=np.int64),
+            "comp_ids": np.asarray(self.comp_ids, dtype=np.int64),
+            "comp_chem_id": np.asarray(self.comp_chem_id, dtype=np.int64),
+            "comp_class": np.asarray(self.comp_class, dtype=np.int64),
+            "tau_comp": np.asarray(float(self.tau_comp), dtype=np.float32),
+            "t0": np.asarray(float(self.t0), dtype=np.float32),
+            "mu_cluster": np.asarray(self.mu_cluster, dtype=np.float32),
+            "alpha_comp": np.asarray(self.alpha_comp, dtype=np.float32),
+            "w_cluster": np.asarray(self.w_cluster, dtype=np.float32),
+            "tau_b": np.asarray(float(self.tau_b), dtype=np.float32),
+            "sigma2": np.asarray(float(self.sigma2), dtype=np.float32),
+            "lambda_slopes": np.asarray(float(self.lambda_slopes), dtype=np.float32),
+            "alpha_z_center": np.asarray(self.alpha_z_center, dtype=np.float32),
+            "alpha_theta": np.asarray(self.alpha_theta, dtype=np.float32),
+        }
+        np.savez_compressed(path, **payload)
+
+    @staticmethod
+    def load_npz(path: Path) -> "PartialPoolBackoffSummaries":
+        npz = np.load(path, allow_pickle=True)
+        feature_names = tuple(str(s) for s in npz["feature_names"].tolist())
+        if "alpha_z_center" not in npz.files or "alpha_theta" not in npz.files:
+            raise ValueError(
+                "Backoff artifact missing chem-linear parameters (alpha_z_center/alpha_theta). "
+                "Re-train the partial pooling model with chem-linear enabled."
+            )
+        comp_ids = np.asarray(npz["comp_ids"], dtype=np.int64)
+        comp_chem_id = np.asarray(npz["comp_chem_id"], dtype=np.int64)
+        if comp_chem_id.shape != comp_ids.shape:
+            comp_chem_id = np.full(comp_ids.shape, -1, dtype=np.int64)
+        tau_comp_val = float(npz["tau_comp"]) if "tau_comp" in npz.files else float("nan")
+        if not np.isfinite(tau_comp_val):
+            raise ValueError("Backoff artifact missing tau_comp for chem-linear alpha prior.")
+        return PartialPoolBackoffSummaries(
+            feature_names=feature_names,
+            cluster_ids=np.asarray(npz["cluster_ids"], dtype=np.int64),
+            cluster_supercat_id=np.asarray(npz["cluster_supercat_id"], dtype=np.int64),
+            comp_ids=comp_ids,
+            comp_chem_id=comp_chem_id,
+            comp_class=np.asarray(npz["comp_class"], dtype=np.int64),
+            alpha_z_center=np.asarray(npz["alpha_z_center"], dtype=float),
+            alpha_theta=np.asarray(npz["alpha_theta"], dtype=float),
+            tau_comp=float(tau_comp_val),
+            t0=float(npz["t0"]),
+            mu_cluster=np.asarray(npz["mu_cluster"], dtype=float),
+            alpha_comp=np.asarray(npz["alpha_comp"], dtype=float),
+            w_cluster=np.asarray(npz["w_cluster"], dtype=float),
+            tau_b=float(npz["tau_b"]),
+            sigma2=float(npz["sigma2"]),
+            lambda_slopes=float(npz["lambda_slopes"]),
+        )
+
+
 def apply_global_feature_transform(
     x_arr: np.ndarray, *, center_mode: str = "global", rotation_mode: str = "none"
 ) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray]:

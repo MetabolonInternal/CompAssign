@@ -24,13 +24,13 @@ Per library (e.g. 208/209):
 ### 2. Train models (cap → stage‑1 coefficient summaries)
 
 ```bash
-./scripts/run_rt_prod.sh --libs 208,209 --cap 100
+./src/compassign/rt/train.sh
 ```
 
-Use `--quick` for a smoke run:
+Smoke run:
 
 ```bash
-./scripts/run_rt_prod.sh --libs 208,209 --cap 100 --quick
+./src/compassign/rt/train.sh
 ```
 
 This writes a run directory under `output/` and updates:
@@ -42,7 +42,7 @@ This writes a run directory under `output/` and updates:
 ### 3. Evaluate on realtest + regenerate plots
 
 ```bash
-./scripts/run_rt_prod_eval.sh --libs 208,209 --cap 100
+./src/compassign/rt/eval.sh
 ```
 
 This evaluates all available models in the run directory on `realtest` and writes:
@@ -59,4 +59,3 @@ This evaluates all available models in the run directory on `realtest` and write
 - The recommended model for peak assignment is the partial pooling PyMC ridge model.
 - The sklearn ridge baseline is useful for debugging but typically under‑covers (under‑calibrated)
   at nominal 95% intervals.
-

@@ -37,13 +37,12 @@ poetry shell  # or prefix commands with `poetry run`
 
 This repository provides a small set of shell scripts that orchestrate the main stages.
 
-- `scripts/run_rt_prod.sh` trains the production RT ridge models (partial pooling + fallbacks) from `repo_export/` RT CSVs; use `--quick` for a smoke run.
-- `scripts/run_rt_prod_eval.sh` evaluates the trained coefficient summaries on `realtest` and regenerates the comparison plots.
-- `scripts/plot_rt_multilevel.sh` regenerates the evaluation plots for a run directory produced by `scripts/run_rt_prod.sh`.
-- `scripts/pipelines/run_validation.sh` executes a small validation suite and produces a brief summary; use it for local smoke checks.
+- `src/compassign/rt/train.sh` trains the production RT ridge models (partial pooling + baselines) from `repo_export/` RT CSVs.
+- `src/compassign/rt/eval.sh` evaluates the trained coefficient summaries on `realtest` and regenerates the comparison plots.
+- `src/compassign/rt/prep.sh` fetches Pachyderm training data and rebuilds `repo_export/` inputs for training/evaluation.
+- `src/compassign/active_learning/validation/run_validation.sh` executes a small validation suite and produces a brief summary; use it for local smoke checks.
 
-Legacy synthetic/active-learning runners (`scripts/pipelines/run_training.sh`, `scripts/pipelines/run_al.sh`) are currently
-disabled pending a port to the current RT ridge pipeline.
+Legacy synthetic/active-learning runners are currently disabled pending a port to the current RT ridge pipeline.
 
 ## License
 

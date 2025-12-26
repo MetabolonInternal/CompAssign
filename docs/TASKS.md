@@ -7,9 +7,9 @@
 - Recommended model: PyMC ridge with partial pooling (exports `Stage1CoeffSummaries`).
 - Baselines: PyMC ridge (supercategory) and sklearn ridge (supercategory). Optional legacy lasso baselines exist but are not required.
 - Reproduce (cap100 → realtest):
-  - `./scripts/run_rt_prod.sh --cap 100 --libs 208,209`
-  - `./scripts/run_rt_prod_eval.sh --cap 100 --libs 208,209`
-  - `./scripts/plot_rt_multilevel.sh --cap 100 --libs 208,209`
+  - `./src/compassign/rt/train.sh`
+  - `./src/compassign/rt/eval.sh`
+  - `poetry run python -m compassign.rt.plot_rt_multilevel_results --cap cap100 --libs 208,209 --anchor none --tag full`
 - Report: `docs/models/rt_pymc_multilevel_pooling_report.pdf`
 
 ## RT Multi-Level Curate + Supercategory (new)
@@ -35,12 +35,12 @@ Key observation (repo_export)
 
 What we should do (fix mapping semantics)
 
-- Regenerate mappings with `scripts/pipelines/check_rt_metadata_mapping.py`:
+- Regenerate mappings with `python -m compassign.rt.data_prep.check_rt_metadata_mapping`:
   - lib209: `species_raw = species_matrix_type`, `species_group_raw = group`.
   - lib208: `species_raw = JCJ_COMBO`, `species_group_raw = group`.
   - The script enforces nesting (each `species_raw` belongs to exactly one `group`) and drops rows with missing group.
 - For reproducibility, use the end-to-end prep runner:
-  - `bash scripts/pipelines/run_rt_multilevel_data_prep.sh --libs 208,209 --caps 100`
+  - `./src/compassign/rt/prep.sh`
 
 Concrete spec (collapsed ridge; explicit intercept)
 
@@ -80,7 +80,7 @@ Next experiments (tail-first; cap5 → realtest)
   - baseline grouping: `--group-col species_cluster` (status quo),
   - subgroup grouping only: `--group-col species` (no pooling),
   - subgroup grouping + pooling: `--group-col species --intercept-mode explicit --intercept-prior comp_hier_supercat --slope-head-mode cluster_supercat`.
-- Evaluate each with `scripts/pipelines/eval_rt_coeff_summaries_by_support.py` on realtest (streaming; start with `--max-test-rows 200000`).
+- Evaluate each with `python -m compassign.rt.eval_rt_coeff_summaries_by_support` on realtest (streaming; start with `--max-test-rows 200000`).
 
 ## Covariate‑Shift: Model Change Discussion
 
@@ -148,8 +148,8 @@ Should we change the model?
   - Supercategory baseline: `src/compassign/rt/pymc_supercategory_ridge.py`
   - Shared collapsed-slope implementation: `src/compassign/rt/ridge_stage1.py`
 
-- Legacy experiment runners under `scripts/experiments/rt/` that depended on the removed hierarchical RT model are now
-  disabled stubs and must be ported before use.
+- Legacy experiment runners that depended on the removed hierarchical RT model were removed. If needed, recover them
+  from git history and port to the Stage1CoeffSummaries-based ridge RT pipeline first.
 
 ## Investigate Species×Chemistry Structure (Future Work)
 

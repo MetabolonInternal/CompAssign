@@ -32,6 +32,7 @@ from .pymc_supercategory_ridge import (  # noqa: F401
 )
 from .ridge_stage1 import (  # noqa: F401
     ChemHierBackoffSummaries,
+    PartialPoolBackoffSummaries,
     Stage1CoeffSummaries,
     _compute_group_posterior_summaries,
     _compute_group_posterior_summaries_with_b_prior,
