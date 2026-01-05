@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import scripts.pipelines.eval_rt_coeff_summaries_by_support as eval_support
+import compassign.rt.eval_rt_coeff_summaries_by_support as eval_support
 from src.compassign.rt.pymc_collapsed_ridge import Stage1CoeffSummaries
 
 

@@ -4,7 +4,7 @@ from typing import Dict, Tuple
 import numpy as np
 import pandas as pd
 
-from scripts.pipelines.train_rt_prod import load_production_csv
+from compassign.rt.prod_csv_loader import load_production_csv
 
 
 def _make_synthetic_rt_csv(tmp_path: Path) -> Path:

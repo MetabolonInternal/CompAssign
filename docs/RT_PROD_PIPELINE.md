@@ -2,10 +2,10 @@
 
 This document describes how to turn Pachyderm exports plus library metadata into
 compact, chemistry‑aware RT training inputs that are compatible with
-the production ridge RT pipeline (`./scripts/run_rt_prod.sh`).
+the production ridge RT pipeline (`./src/compassign/rt/train.sh` then `./src/compassign/rt/eval.sh`).
 
 The workflow is modular and reproducible; each step is a small script under
-`scripts/pipelines` or `scripts/data_prep`.
+`compassign.rt.data_prep` or `scripts/data_prep`.
 
 ---
 
@@ -19,7 +19,7 @@ Starting point is a Pachyderm export directory that contains:
 Run the merger:
 
 ```bash
-./scripts/pipelines/merge_pachyderm_training.py -i repo_export/<export_dir>
+python -m compassign.rt.data_prep.merge_pachyderm_training -i repo_export/<export_dir>
 ```
 
 This produces a merged Parquet per export:
@@ -40,7 +40,7 @@ Large merged files typically contain multiple `lib_id` values. Split them into
 per‑library Parquets:
 
 ```bash
-python scripts/pipelines/split_merged_by_lib.py \
+python -m compassign.rt.data_prep.split_merged_by_lib \
   repo_export/merged_training_<export_hash>.parquet
 ```
 
@@ -62,7 +62,7 @@ To understand how many compounds per species matrix type we have, and to plan
 sampling, run:
 
 ```bash
-python scripts/pipelines/summarize_species_compounds.py \
+python -m compassign.rt.data_prep.summarize_species_compounds \
   repo_export/merged_training_*_lib*.parquet
 ```
 
@@ -87,7 +87,7 @@ NUTS this is too large. We cap the number of rows per
 `(species_matrix_type, comp_id)` pair using:
 
 ```bash
-python scripts/pipelines/sample_per_species_compound.py \
+python -m compassign.rt.data_prep.sample_per_species_compound \
   repo_export/merged_training_<export_hash>_lib<lib>.parquet \
   --cap-per-pair 5 \
   --seed 42
@@ -96,7 +96,7 @@ python scripts/pipelines/sample_per_species_compound.py \
 and optionally:
 
 ```bash
-python scripts/pipelines/sample_per_species_compound.py \
+python -m compassign.rt.data_prep.sample_per_species_compound \
   repo_export/merged_training_<export_hash>_lib<lib>.parquet \
   --cap-per-pair 10 \
   --seed 42
@@ -172,7 +172,7 @@ We enrich the cap‑sampled Parquets with CHEM_ID and `compound_class`, and drop
 chemicals that cannot be mapped cleanly:
 
 ```bash
-python scripts/pipelines/attach_chem_classes_and_filter.py \
+python -m compassign.rt.data_prep.attach_chem_classes_and_filter \
   --input repo_export/merged_training_<export_hash>_lib<lib>_cap5.parquet \
   --lib-mapping repo_export/lib_comp_chem_mapping_lib<lib>.csv \
   --classes resources/metabolites/chem_classes_k32.parquet
@@ -206,7 +206,7 @@ Row counts after this step (cap 5, example):
 
 ### 7. Build RT production CSVs (RT ridge inputs)
 
-The production RT ridge trainers (driven by `./scripts/run_rt_prod.sh`) expect a CSV with:
+The production RT ridge trainers (driven by `./src/compassign/rt/train.sh`) expect a CSV with:
 
 - `sampleset_id, worksheet_id, task_id`
 - `species, species_cluster`
@@ -228,7 +228,7 @@ Examples present in this repo:
 Build the RT CSV from a chemclass Parquet:
 
 ```bash
-python scripts/pipelines/make_rt_prod_csv_from_merged.py \
+python -m compassign.rt.data_prep.make_rt_prod_csv_from_merged \
   --input repo_export/merged_training_de194c2cc2114efaa1075ccf7539d0cb_lib209_cap5_chemclass.parquet \
   --species-mapping repo_export/merged_training_de194c2cc2114efaa1075ccf7539d0cb_lib209_species_mapping.csv
 ```
@@ -266,11 +266,11 @@ Approximate sizes:
 These CSVs are ready for the production ridge training wrapper, e.g.:
 
 ```bash
-./scripts/run_rt_prod.sh --libs 209 --cap 100 --quick
-./scripts/run_rt_prod_eval.sh --libs 209 --cap 100
+./src/compassign/rt/train.sh
+./src/compassign/rt/eval.sh
 ```
 
-The `--quick` flag reduces ADVI steps for a smoke run.
+The default `./src/compassign/rt/train.sh` configuration is intended for the report run.
 
 ---
 
@@ -289,6 +289,6 @@ These preserve:
   - a lib comp→chem mapping, and
   - a ChemBERTa embedding + compound_class
 
-At training time, `./scripts/run_rt_prod.sh` trains RT ridge models (including a partial pooling
+At training time, `./src/compassign/rt/train.sh` trains RT ridge models (including a partial pooling
 PyMC model) directly from these CSVs and writes stage‑1 coefficient summaries used downstream
 for evaluation and peak assignment.

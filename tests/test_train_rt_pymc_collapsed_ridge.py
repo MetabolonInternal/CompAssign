@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import scripts.pipelines.train_rt_pymc_collapsed_ridge as trainer
+import compassign.rt.train_rt_pymc_collapsed_ridge as trainer
 from src.compassign.rt.pymc_collapsed_ridge import Stage1CoeffSummaries
 
 

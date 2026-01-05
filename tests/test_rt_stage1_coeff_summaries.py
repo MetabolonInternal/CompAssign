@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-import scripts.pipelines.train_rt_stage1_coeff_summaries as stage1
+import compassign.rt.train_rt_stage1_coeff_summaries as stage1
 from src.compassign.rt.pymc_collapsed_ridge import Stage1CoeffSummaries
 
 

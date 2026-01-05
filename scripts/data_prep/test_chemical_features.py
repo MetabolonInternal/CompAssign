@@ -12,14 +12,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
-import sys
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from scripts.data_prep.create_synthetic_data import create_synthetic_dataset  # noqa: E402
-from src.compassign.utils import compute_all_chemical_features  # noqa: E402
+from compassign.generators.create_synthetic_data import create_synthetic_dataset
+from compassign.utils import compute_all_chemical_features
 
 
 def analyze_chemical_features(n_compounds=10, n_species=5, n_noise_peaks=100):
