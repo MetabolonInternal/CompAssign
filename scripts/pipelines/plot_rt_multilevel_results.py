@@ -211,20 +211,13 @@ def _safe_model_label(model_dir_name: str) -> str:
         "pymc_pooled_species_comp_hier_supercat": "Partial pooling (intercepts)",
         "pymc_collapsed_group_species_cluster": "Ridge (supercategory)",
         "pymc_collapsed_group_species_cluster_poly2": "Ridge (supercategory) + poly2",
-        "pymc_pooled_species_comp_hier_supercat_cluster_supercat": "Ridge (partial pooling)",
+        "pymc_pooled_species_comp_hier_supercat_cluster_supercat": "Ridge (partial pooling, chem-linear)",
         "pymc_pooled_species_chem_hier_cluster_supercat": "Chem hier",
         "sklearn_ridge_species_cluster": "Ridge (supercategory, sklearn)",
         "lasso_eslasso_species_cluster": "Lasso (supercategory)",
         "lasso_eslasso_local": "Lasso (species)",
     }
     return mapping.get(model_dir_name, model_dir_name)
-
-
-def _format_alpha_prior_mode(mode: str) -> str:
-    mode = str(mode).strip()
-    if not mode:
-        return ""
-    return mode.replace("_", "-")
 
 
 def _build_model_labels(
@@ -235,44 +228,7 @@ def _build_model_labels(
     default_anchor: str,
     model_specs: Sequence[ModelSpec],
 ) -> dict[str, str]:
-    labels: dict[str, str] = {spec.display: _safe_model_label(spec.display) for spec in model_specs}
-
-    # Enrich partial pooling label with the alpha prior mode when available.
-    for spec in model_specs:
-        if spec.model != "pymc_pooled_species_comp_hier_supercat_cluster_supercat":
-            continue
-        alpha_modes: set[str] = set()
-        for lib in libs:
-            anchor = str(spec.anchor or default_anchor)
-            config_path = (
-                run_dir
-                / f"lib{int(lib)}"
-                / str(cap)
-                / f"features_{anchor}"
-                / str(spec.model)
-                / "config.json"
-            )
-            if not config_path.exists():
-                continue
-            try:
-                d = json.loads(config_path.read_text())
-            except Exception:
-                continue
-            mode = _format_alpha_prior_mode(str(d.get("alpha_prior_mode", "")))
-            if mode:
-                alpha_modes.add(mode)
-
-        if len(alpha_modes) == 1:
-            mode = next(iter(alpha_modes))
-            labels[spec.display] = f"Ridge (partial pooling, {mode})"
-        elif len(alpha_modes) > 1:
-            LOGGER.warning(
-                "Multiple alpha_prior_mode values for %s: %s; leaving generic label",
-                spec.model,
-                sorted(alpha_modes),
-            )
-
-    return labels
+    return {spec.display: _safe_model_label(spec.display) for spec in model_specs}
 
 
 def _tag_suffix(tag: str | None) -> str:

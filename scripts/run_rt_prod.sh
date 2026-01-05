@@ -34,13 +34,10 @@ Options:
   --cap <capN|N>         Training cap label (default: cap100)
   --libs <ids>           Comma-separated lib ids (default: 208,209)
   --seed <int>           Random seed (default: 42)
-  --partial-alpha-prior-mode <mode>
-                         Compound prior mode for the partial pooling model:
-                         iid|chem_linear|chem_interaction (default: chem_linear)
   --chem-embeddings-path <path>
-                         ChemBERTa embedding parquet (used when partial-alpha-prior-mode is chem_*)
+                         ChemBERTa PCA embedding parquet (default: resources/metabolites/embeddings_chemberta_pca20.parquet)
   --theta-alpha-prior-sigma <float>
-                         Prior sigma for theta_alpha (chem_* modes; default: 1.0)
+                         Prior sigma for theta_alpha in the chem-linear compound prior (default: 1.0)
   --no-eval              Train only (skip realtest evaluation, plots, and PDF rebuild)
   --no-build-pdf         After training/eval, skip rebuilding docs/models/rt_pymc_multilevel_pooling_report.pdf
   --quick                Reduced ADVI steps for a smoke run
@@ -61,7 +58,6 @@ SEED="42"
 QUICK="0"
 SKIP_EXISTING="1"
 TRAIN_SKLEARN="1"
-PARTIAL_ALPHA_PRIOR_MODE="chem_linear"
 CHEM_EMBEDDINGS_PATH="resources/metabolites/embeddings_chemberta_pca20.parquet"
 THETA_ALPHA_PRIOR_SIGMA="1.0"
 # Default: run the full report-oriented prod pipeline.
@@ -84,10 +80,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --seed)
       SEED="${2:-}"
-      shift 2
-      ;;
-    --partial-alpha-prior-mode)
-      PARTIAL_ALPHA_PRIOR_MODE="${2:-}"
       shift 2
       ;;
     --chem-embeddings-path)
@@ -202,7 +194,6 @@ echo "[train] lib${lib} ${CAP}"
         --seed "${SEED}" \
         --include-es-all \
         --lambda-slopes "${LAMBDA_SLOPES}" \
-        --alpha-prior-mode "${PARTIAL_ALPHA_PRIOR_MODE}" \
         --chem-embeddings-path "${CHEM_EMBEDDINGS_PATH}" \
         --theta-alpha-prior-sigma "${THETA_ALPHA_PRIOR_SIGMA}" \
         --method advi \

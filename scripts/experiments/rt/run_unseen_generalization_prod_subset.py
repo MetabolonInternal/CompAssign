@@ -118,26 +118,16 @@ def parse_args() -> argparse.Namespace:
         help="ADVI steps (if --train-method advi).",
     )
     parser.add_argument(
-        "--partial-alpha-prior-mode",
-        type=str,
-        choices=["iid", "chem_linear", "chem_interaction"],
-        default="chem_linear",
-        help="Compound prior mode for the partial pooling model (report default: chem_linear).",
-    )
-    parser.add_argument(
         "--chem-embeddings-path",
         type=Path,
         default=DEFAULT_CHEM_EMBEDDINGS_PATH,
-        help=(
-            "ChemBERTa embedding parquet (required when --partial-alpha-prior-mode is chem_linear/"
-            "chem_interaction)."
-        ),
+        help="ChemBERTa embedding parquet (required for chem-linear partial pooling).",
     )
     parser.add_argument(
         "--theta-alpha-prior-sigma",
         type=float,
         default=1.0,
-        help="Prior sigma for theta_alpha (chem_* modes only).",
+        help="Prior sigma for theta_alpha in the chem-linear compound prior.",
     )
     parser.add_argument(
         "--chunk-size",
@@ -404,11 +394,10 @@ def main() -> None:
             f"Invalid --modes entries (allowed: species,species_comp): {sorted(invalid_modes)}"
         )
 
-    alpha_prior_mode = str(args.partial_alpha_prior_mode)
     chem_embeddings_path = args.chem_embeddings_path
     if not chem_embeddings_path.is_absolute():
         chem_embeddings_path = (REPO_ROOT / chem_embeddings_path).resolve()
-    if alpha_prior_mode != "iid" and not chem_embeddings_path.exists():
+    if not chem_embeddings_path.exists():
         raise SystemExit(f"Missing chem embeddings parquet: {chem_embeddings_path}")
 
     # 1) Choose a deterministic subset (species + comp_ids).
@@ -476,7 +465,7 @@ def main() -> None:
                 model_dir=partial_dir, required=("coeff_npz", "backoff_npz")
             )
         if partial_paths is None:
-            print(f"[train] partial_pool ({method}; alpha_prior_mode={alpha_prior_mode}) ...")
+            print(f"[train] partial_pool ({method}; chem-linear) ...")
             partial_art = train_pymc_partial_pool_ridge_from_csv(
                 data_csv=train_csv,
                 seed=int(args.seed),
@@ -484,8 +473,7 @@ def main() -> None:
                 feature_center="global",
                 lambda_slopes=3e-4,
                 sigma_y_prior=0.05,
-                alpha_prior_mode=alpha_prior_mode,  # type: ignore[arg-type]
-                chem_embeddings_path=chem_embeddings_path if alpha_prior_mode != "iid" else None,
+                chem_embeddings_path=chem_embeddings_path,
                 theta_alpha_prior_sigma=float(args.theta_alpha_prior_sigma),
                 method=method,  # type: ignore[arg-type]
                 advi_steps=int(args.advi_steps),
@@ -535,7 +523,7 @@ def main() -> None:
         if bool(args.skip_existing) and partial_eval_json.exists():
             print("[eval] Skip partial_pool backoff-class (exists)")
         else:
-            print("[eval] partial_pool with hierarchy backoff (backoff-class) ...")
+            print("[eval] partial_pool with hierarchy backoff (chem-linear) ...")
             _run(
                 [
                     sys.executable,
@@ -550,17 +538,15 @@ def main() -> None:
                     "--output-dir",
                     str(eval_dir),
                     "--label",
-                    "partial_pool_class",
-                    "--alpha-backoff-mode",
-                    "class",
+                    "partial_pool",
+                    "--chem-embeddings-path",
+                    str(chem_embeddings_path),
                     "--log-every-chunks",
                     "0",
                 ],
                 cwd=REPO_ROOT,
             )
-            (eval_dir / "rt_eval_partial_pool_backoff_partial_pool_class.json").rename(
-                partial_eval_json
-            )
+            (eval_dir / "rt_eval_partial_pool_backoff_partial_pool.json").rename(partial_eval_json)
 
         partial_metrics = _load_json(partial_eval_json)
 
@@ -627,7 +613,6 @@ def main() -> None:
             "partial_pool": partial_metrics,
             "sklearn_supercategory": sklearn_super_metrics,
             "lasso_supercategory": lasso_metrics,
-            "partial_alpha_prior_mode": alpha_prior_mode,
             "chem_embeddings_path": str(chem_embeddings_path),
         }
         results.append(row)

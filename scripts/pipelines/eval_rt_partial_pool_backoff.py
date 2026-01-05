@@ -90,46 +90,10 @@ def parse_args() -> argparse.Namespace:
         help="Optional label used in output filenames.",
     )
     parser.add_argument(
-        "--alpha-backoff-mode",
-        type=str,
-        choices=["class", "embeddings"],
-        default="class",
-        help=(
-            "How to back off alpha_comp for unseen comp_id values. "
-            "'class' uses compound_class means; 'embeddings' fits a ridge regression from "
-            "ChemBERTa PCA-20 embeddings -> alpha_comp on the training artifact."
-        ),
-    )
-    parser.add_argument(
         "--chem-embeddings-path",
         type=Path,
         default=Path("resources/metabolites/embeddings_chemberta_pca20.parquet"),
-        help="ChemBERTa PCA-20 embedding parquet (used when --alpha-backoff-mode embeddings).",
-    )
-    parser.add_argument(
-        "--alpha-embed-ridge",
-        type=float,
-        default=1e-2,
-        help="Ridge penalty used for the alpha_comp embedding regression.",
-    )
-    parser.add_argument(
-        "--no-supercat-comp-backoff",
-        action="store_true",
-        help=(
-            "Disable derived (species_cluster, comp_id) coefficient backoff for unseen species/(species, comp_id) "
-            "groups. When enabled (default), we aggregate fitted (species, comp_id) coefficients to construct a "
-            "compound-specific supercategory backoff."
-        ),
-    )
-    parser.add_argument(
-        "--no-comp-backoff",
-        dest="no_comp_backoff",
-        action="store_true",
-        help=(
-            "Disable comp_id-only coefficient backoff for unseen (species, comp_id) keys where the comp_id is still "
-            "seen elsewhere in training. When enabled (default), we aggregate fitted (species, comp_id) coefficients "
-            "across species for each comp_id and reuse that as a backoff coefficient."
-        ),
+        help="ChemBERTa PCA-20 embedding parquet (required for chem-linear compound backoff).",
     )
     parser.add_argument(
         "--log-every-chunks",
@@ -458,7 +422,6 @@ def main() -> None:
     cluster_ids = np.asarray(backoff.cluster_ids, dtype=np.int64)
     cluster_supercat_id = np.asarray(backoff.cluster_supercat_id, dtype=np.int64)
     comp_ids = np.asarray(backoff.comp_ids, dtype=np.int64)
-    comp_chem_id = np.asarray(backoff.comp_chem_id, dtype=np.int64)
     comp_class = np.asarray(backoff.comp_class, dtype=np.int64)
     mu_cluster = np.asarray(backoff.mu_cluster, dtype=np.float64)
     alpha_comp = np.asarray(backoff.alpha_comp, dtype=np.float64)
@@ -469,18 +432,7 @@ def main() -> None:
     lambda_slopes = float(backoff.lambda_slopes)
     if lambda_slopes <= 0.0:
         raise SystemExit("Invalid lambda_slopes in backoff artifact")
-    tau_comp2 = float(backoff.tau_comp) ** 2 if getattr(backoff, "tau_comp", None) else 0.0
-    alpha_theta_art = getattr(backoff, "alpha_theta", None)
-    alpha_z_center_art = getattr(backoff, "alpha_z_center", None)
-    chem_theta0 = getattr(backoff, "chem_theta0", None)
-    chem_theta_supercat = getattr(backoff, "chem_theta_supercat", None)
-    chem_theta_cluster = getattr(backoff, "chem_theta_cluster", None)
-    chem_z_center = getattr(backoff, "chem_z_center", None)
-    if chem_z_center is None:
-        chem_z_center = alpha_z_center_art
-    use_chem_interaction = (
-        chem_theta_cluster is not None and chem_z_center is not None and comp_chem_id.size > 0
-    )
+    tau_comp2 = float(backoff.tau_comp) ** 2
 
     supercat_ids = np.unique(cluster_supercat_id).astype(np.int64, copy=False)
     mu_supercat = _compute_supercat_means(
@@ -492,10 +444,9 @@ def main() -> None:
     p = int(len(backoff.feature_names))
     w_global = np.mean(w_cluster, axis=0) if w_cluster.size else np.zeros((p,), dtype=np.float64)
 
-    use_supercat_comp_backoff = not bool(args.no_supercat_comp_backoff)
     sc_comp_keys = None
     sc_comp_beta_hat = None
-    if use_supercat_comp_backoff and supercat_id_stage1 is not None:
+    if supercat_id_stage1 is not None:
         try:
             sc_comp_keys, sc_comp_beta_hat = _build_supercat_comp_backoff_beta(
                 supercat_id=np.asarray(supercat_id_stage1, dtype=np.int64),
@@ -509,37 +460,35 @@ def main() -> None:
             sc_comp_keys = None
             sc_comp_beta_hat = None
 
-    use_comp_backoff = not bool(args.no_comp_backoff)
     comp_backoff_ids = None
     comp_backoff_beta_hat = None
     comp_backoff_mu_mean = None
-    if use_comp_backoff:
-        try:
-            species_train = np.asarray(stage1.species_cluster, dtype=np.int64)
-            idx_mu = np.searchsorted(cluster_ids, species_train)
-            ok_mu = (idx_mu >= 0) & (idx_mu < cluster_ids.size)
-            if ok_mu.any():
-                ok_mu[ok_mu] &= cluster_ids[idx_mu[ok_mu]] == species_train[ok_mu]
-            mu_train = np.zeros((int(species_train.size),), dtype=np.float64)
-            if ok_mu.any():
-                mu_train[ok_mu] = mu_cluster[idx_mu[ok_mu]]
+    try:
+        species_train = np.asarray(stage1.species_cluster, dtype=np.int64)
+        idx_mu = np.searchsorted(cluster_ids, species_train)
+        ok_mu = (idx_mu >= 0) & (idx_mu < cluster_ids.size)
+        if ok_mu.any():
+            ok_mu[ok_mu] &= cluster_ids[idx_mu[ok_mu]] == species_train[ok_mu]
+        mu_train = np.zeros((int(species_train.size),), dtype=np.float64)
+        if ok_mu.any():
+            mu_train[ok_mu] = mu_cluster[idx_mu[ok_mu]]
 
-            (
-                comp_backoff_ids,
-                comp_backoff_beta_hat,
-                comp_backoff_mu_mean,
-            ) = _build_comp_backoff_beta_and_mu(
-                comp_id=np.asarray(stage1.comp_id, dtype=np.int64),
-                n_obs=np.asarray(stage1.n_obs, dtype=np.int64),
-                beta_hat=beta_hat,
-                mu_group=mu_train,
-            )
-        except Exception as e:
-            raise SystemExit(f"Failed to build comp-id backoff coefficients: {e}") from e
-        if comp_backoff_ids.size == 0:
-            comp_backoff_ids = None
-            comp_backoff_beta_hat = None
-            comp_backoff_mu_mean = None
+        (
+            comp_backoff_ids,
+            comp_backoff_beta_hat,
+            comp_backoff_mu_mean,
+        ) = _build_comp_backoff_beta_and_mu(
+            comp_id=np.asarray(stage1.comp_id, dtype=np.int64),
+            n_obs=np.asarray(stage1.n_obs, dtype=np.int64),
+            beta_hat=beta_hat,
+            mu_group=mu_train,
+        )
+    except Exception as e:
+        raise SystemExit(f"Failed to build comp-id backoff coefficients: {e}") from e
+    if comp_backoff_ids.size == 0:
+        comp_backoff_ids = None
+        comp_backoff_beta_hat = None
+        comp_backoff_mu_mean = None
 
     class_ids = np.unique(comp_class[comp_class >= 0]).astype(np.int64, copy=False)
     alpha_class = (
@@ -548,64 +497,24 @@ def main() -> None:
         else np.zeros((0,), dtype=np.float64)
     )
 
-    alpha_mode = str(args.alpha_backoff_mode)
-    if alpha_mode not in {"class", "embeddings"}:
-        raise SystemExit(f"Unknown alpha-backoff-mode: {alpha_mode}")
+    emb_path = args.chem_embeddings_path
+    if not emb_path.is_absolute():
+        emb_path = (REPO_ROOT / emb_path).resolve()
 
-    z_center = None
-    theta_alpha = None
-    embed_pos = None
-    embed_features = None
-    need_embeddings = bool(alpha_mode == "embeddings" or use_chem_interaction)
-    if need_embeddings:
-        emb_path = args.chem_embeddings_path
-        if not emb_path.is_absolute():
-            emb_path = (REPO_ROOT / emb_path).resolve()
+    emb = load_chemberta_pca20(emb_path)
+    order = np.argsort(emb.chem_id.astype(np.int64), kind="mergesort")
+    embed_pos = emb.chem_id[order].astype(np.int64, copy=False)
+    embed_features = emb.features[order].astype(np.float64, copy=False)
 
-        emb = load_chemberta_pca20(emb_path)
-        order = np.argsort(emb.chem_id.astype(np.int64), kind="mergesort")
-        chem_ids_sorted = emb.chem_id[order].astype(np.int64, copy=False)
-        features_sorted = emb.features[order].astype(np.float64, copy=False)
-        embed_pos = chem_ids_sorted
-        embed_features = features_sorted
-
-    if alpha_mode == "embeddings":
-        if embed_pos is None or embed_features is None:
-            raise RuntimeError("Internal error: embeddings requested but not loaded")
-
-        # Prefer embedded alpha regression parameters learned during training (single-model).
-        if alpha_theta_art is not None and alpha_z_center_art is not None:
-            theta_alpha = np.asarray(alpha_theta_art, dtype=np.float64)
-            z_center = np.asarray(alpha_z_center_art, dtype=np.float64)
-            if theta_alpha.ndim != 1 or z_center.ndim != 1 or theta_alpha.shape != z_center.shape:
-                raise SystemExit("Invalid alpha_theta/alpha_z_center in backoff artifact")
-        else:
-            if float(args.alpha_embed_ridge) < 0:
-                raise SystemExit("--alpha-embed-ridge must be >= 0")
-
-            # Fallback for legacy artifacts: fit alpha_comp ~ (z - mean_z) @ theta on training comps.
-            chem_train = np.asarray(comp_chem_id, dtype=np.int64)
-            ok_train = chem_train >= 0
-            idx_train = np.searchsorted(embed_pos, chem_train[ok_train])
-            ok_embed = (idx_train >= 0) & (idx_train < embed_pos.size)
-            if ok_embed.any():
-                ok_embed[ok_embed] &= (
-                    embed_pos[idx_train[ok_embed]] == chem_train[ok_train][ok_embed]
-                )
-            if not ok_embed.any():
-                raise SystemExit(
-                    "No comp_ids in backoff artifact have chem embeddings; cannot fit."
-                )
-
-            y_train = np.asarray(alpha_comp[ok_train], dtype=np.float64)[ok_embed]
-            z_train = embed_features[idx_train[ok_embed]]
-            z_center = np.mean(z_train, axis=0)
-            zc = z_train - z_center[None, :]
-            ridge = float(args.alpha_embed_ridge)
-            gram = zc.T @ zc
-            if ridge > 0:
-                gram = gram + ridge * np.eye(int(gram.shape[0]), dtype=np.float64)
-            theta_alpha = np.linalg.solve(gram, zc.T @ y_train)
+    theta_alpha = np.asarray(backoff.alpha_theta, dtype=np.float64)
+    z_center = np.asarray(backoff.alpha_z_center, dtype=np.float64)
+    if theta_alpha.ndim != 1 or z_center.ndim != 1 or theta_alpha.shape != z_center.shape:
+        raise SystemExit("Invalid alpha_theta/alpha_z_center in backoff artifact")
+    if int(embed_features.shape[1]) != int(theta_alpha.size):
+        raise SystemExit(
+            "Embedding dim mismatch: "
+            f"alpha_theta has d={int(theta_alpha.size)}, embeddings have d={int(embed_features.shape[1])}"
+        )
 
     total_rows = 0
     max_rows = int(args.max_test_rows)
@@ -797,18 +706,10 @@ def main() -> None:
             alpha_set = np.zeros((int(comp_m.size),), dtype=bool)
             if ok_comp.any():
                 alpha_m[ok_comp] = alpha_comp[idx_comp[ok_comp]]
-                alpha_set[ok_comp] = True
+            alpha_set[ok_comp] = True
 
-            # Embedding-based alpha backoff for unseen comp_ids.
             miss_comp = ~ok_comp
-            if alpha_mode == "embeddings" and miss_comp.any():
-                if (
-                    embed_pos is None
-                    or embed_features is None
-                    or theta_alpha is None
-                    or z_center is None
-                ):
-                    raise RuntimeError("Internal error: missing embedding regression state")
+            if miss_comp.any():
                 chem_m = chem[miss][miss_comp]
                 idx_e = np.searchsorted(embed_pos, chem_m)
                 ok_e = (idx_e >= 0) & (idx_e < embed_pos.size)
@@ -821,7 +722,7 @@ def main() -> None:
                     alpha_m[take] = alpha_hat
                     alpha_set[take] = True
 
-            # compound_class fallback for any remaining unseen comp_ids (or if alpha_mode=class).
+            # compound_class fallback for any remaining unseen comp_ids.
             miss_alpha = ~alpha_set
             if miss_alpha.any() and class_ids.size > 0:
                 idx_cls = np.searchsorted(class_ids, cls_m[miss_alpha])
@@ -833,64 +734,7 @@ def main() -> None:
                     alpha_m[take] = alpha_class[idx_cls[ok_cls]]
                     alpha_set[take] = True
 
-            chem_term = np.zeros((int(sp_m.size),), dtype=np.float64)
-            if use_chem_interaction:
-                if embed_pos is None or embed_features is None:
-                    raise RuntimeError(
-                        "Internal error: chem interaction requested but embeddings not loaded"
-                    )
-                if chem_z_center is None:
-                    raise RuntimeError("Internal error: missing chem_z_center")
-
-                chem_center = np.asarray(chem_z_center, dtype=np.float64)
-                if chem_center.ndim != 1:
-                    raise SystemExit("Invalid chem_z_center in backoff artifact")
-                d = int(chem_center.size)
-                if int(embed_features.shape[1]) != d:
-                    raise SystemExit(
-                        "Embedding dim mismatch: "
-                        f"chem_z_center has d={d}, embeddings have d={int(embed_features.shape[1])}"
-                    )
-
-                theta0 = (
-                    np.asarray(chem_theta0, dtype=np.float64)
-                    if chem_theta0 is not None
-                    else np.zeros((d,), dtype=np.float64)
-                )
-                if theta0.shape != (d,):
-                    raise SystemExit("Invalid chem_theta0 in backoff artifact")
-                theta_rows = np.repeat(theta0[None, :], repeats=int(sp_m.size), axis=0)
-
-                if chem_theta_supercat is not None:
-                    theta_supercat = np.asarray(chem_theta_supercat, dtype=np.float64)
-                    if theta_supercat.shape != (int(supercat_ids.size), d):
-                        raise SystemExit("Invalid chem_theta_supercat in backoff artifact")
-                    idx_sc_all = np.searchsorted(supercat_ids, super_m)
-                    ok_sc_all = (idx_sc_all >= 0) & (idx_sc_all < supercat_ids.size)
-                    if ok_sc_all.any():
-                        ok_sc_all[ok_sc_all] &= (
-                            supercat_ids[idx_sc_all[ok_sc_all]] == super_m[ok_sc_all]
-                        )
-                    if ok_sc_all.any():
-                        theta_rows[ok_sc_all] = theta_supercat[idx_sc_all[ok_sc_all]]
-
-                if chem_theta_cluster is not None:
-                    theta_cluster = np.asarray(chem_theta_cluster, dtype=np.float64)
-                    if theta_cluster.shape != (int(cluster_ids.size), d):
-                        raise SystemExit("Invalid chem_theta_cluster in backoff artifact")
-                    if ok_sp.any():
-                        theta_rows[ok_sp] = theta_cluster[idx_sp[ok_sp]]
-
-                idx_e_all = np.searchsorted(embed_pos, chem_m)
-                ok_e_all = (idx_e_all >= 0) & (idx_e_all < embed_pos.size)
-                if ok_e_all.any():
-                    ok_e_all[ok_e_all] &= embed_pos[idx_e_all[ok_e_all]] == chem_m[ok_e_all]
-                if ok_e_all.any():
-                    z = embed_features[idx_e_all[ok_e_all]]
-                    zc = z - chem_center[None, :]
-                    chem_term[ok_e_all] = np.sum(theta_rows[ok_e_all] * zc, axis=1)
-
-            b_mean = t0 + mu_m + alpha_m + chem_term
+            b_mean = t0 + mu_m + alpha_m
             pred_mean = b_mean + np.sum(w_m * x[miss], axis=1)
 
             slope_var = sigma2_backoff / float(lambda_slopes)
@@ -920,20 +764,13 @@ def main() -> None:
         "coeff_npz": str(coeff_npz),
         "backoff_npz": str(backoff_npz),
         "test_csv": str(test_csv),
-        "alpha_backoff_mode": alpha_mode,
+        "chem_embeddings_path": str(emb_path),
         "uses_supercat_comp_backoff": bool(
             sc_comp_keys is not None and sc_comp_beta_hat is not None
         ),
         "uses_comp_backoff": bool(
             comp_backoff_ids is not None and comp_backoff_beta_hat is not None
         ),
-        "uses_chem_interaction": bool(use_chem_interaction),
-        "alpha_backoff_uses_trained_theta": bool(
-            alpha_mode == "embeddings"
-            and alpha_theta_art is not None
-            and alpha_z_center_art is not None
-        ),
-        "chem_embeddings_path": str(args.chem_embeddings_path) if need_embeddings else None,
         "rows_total": int(total_rows),
         "rows_seen": int(n_seen),
         "rows_supercat_comp_backoff": int(n_sc_comp),

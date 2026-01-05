@@ -27,7 +27,9 @@ Intercept hierarchy (supercategory-aware):
   t0 ~ Normal(0, t0_prior_sigma)
   mu_supercat ~ Normal(0, tau_mu_supercat)
   mu_species ~ Normal(mu_supercat[supercat(species)], tau_mu[supercat(species)])
-  alpha_comp ~ Normal(0, tau_comp)
+  theta_alpha ~ Normal(0, theta_alpha_prior_sigma)
+  delta_comp ~ Normal(0, tau_comp)
+  alpha_comp[comp] = zc_comp^T theta_alpha + delta_comp[comp]
   b_g ~ Normal(t0 + mu_species[species(g)] + alpha_comp[comp(g)], tau_b)
 
 Slope head (supercategory-aware):
@@ -73,7 +75,6 @@ from ..utils.data_features import load_chemberta_pca20
 logger = logging.getLogger(__name__)
 
 PymcMethod = Literal["advi", "map"]
-AlphaPriorMode = Literal["iid", "chem_linear", "chem_interaction"]
 
 REQUIRED_COLS: tuple[str, ...] = (
     "rt",
@@ -97,10 +98,7 @@ class PartialPoolRidgeFitResult:
     tau_b_mean: float
     # Slope head means.
     w_species_mean: np.ndarray  # (C, P)
-    theta_alpha_mean: np.ndarray | None = None  # (D,) optional; chemistry regression weights
-    chem_theta0_mean: np.ndarray | None = None  # (D,) optional; global chem interaction weights
-    chem_theta_supercat_mean: np.ndarray | None = None  # (S, D) optional
-    chem_theta_species_mean: np.ndarray | None = None  # (C, D) optional
+    theta_alpha_mean: np.ndarray  # (D,) chemistry regression weights
 
 
 @dataclass(frozen=True)
@@ -118,8 +116,7 @@ class PartialPoolRidgeTrainArtifacts:
     sigma_y_prior: float
     tau_mu_prior: float
     tau_comp_prior: float
-    alpha_prior_mode: AlphaPriorMode
-    chem_embeddings_path: str | None
+    chem_embeddings_path: str
     theta_alpha_prior_sigma: float
     tau_b_prior: float
     tau_w_prior: float
@@ -171,8 +168,7 @@ def _fit_partial_pool_hyperparams(
     tau_w_prior: float,
     w0_prior_sigma: float,
     t0_prior_sigma: float,
-    alpha_prior_mode: AlphaPriorMode,
-    comp_embed_zc: np.ndarray | None,
+    comp_embed_zc: np.ndarray,
     theta_alpha_prior_sigma: float,
     method: PymcMethod,
     seed: int,
@@ -192,21 +188,16 @@ def _fit_partial_pool_hyperparams(
         raise ValueError("lambda_diag must be > 0")
     if float(sigma_y_prior) <= 0:
         raise ValueError("sigma_y_prior must be > 0")
-    alpha_prior_mode = str(alpha_prior_mode)  # type: ignore[assignment]
-    if alpha_prior_mode not in {"iid", "chem_linear", "chem_interaction"}:
-        raise ValueError(f"Unknown alpha_prior_mode: {alpha_prior_mode}")
-    if alpha_prior_mode in {"chem_linear", "chem_interaction"}:
-        if comp_embed_zc is None:
-            raise ValueError(f"alpha_prior_mode={alpha_prior_mode!r} requires comp_embed_zc")
-        if comp_embed_zc.ndim != 2:
-            raise ValueError(f"comp_embed_zc must be 2D (got shape {comp_embed_zc.shape})")
-        if comp_embed_zc.shape[0] != int(comp_ids_unique.size):
-            raise ValueError(
-                f"comp_embed_zc has n_compounds={comp_embed_zc.shape[0]}, "
-                f"expected {int(comp_ids_unique.size)}"
-            )
-        if float(theta_alpha_prior_sigma) <= 0:
-            raise ValueError("theta_alpha_prior_sigma must be > 0")
+    comp_embed_zc = np.asarray(comp_embed_zc, dtype=np.float64)
+    if comp_embed_zc.ndim != 2:
+        raise ValueError(f"comp_embed_zc must be 2D (got shape {comp_embed_zc.shape})")
+    if comp_embed_zc.shape[0] != int(comp_ids_unique.size):
+        raise ValueError(
+            f"comp_embed_zc has n_compounds={comp_embed_zc.shape[0]}, "
+            f"expected {int(comp_ids_unique.size)}"
+        )
+    if float(theta_alpha_prior_sigma) <= 0:
+        raise ValueError("theta_alpha_prior_sigma must be > 0")
 
     n_groups = int(n_arr.size)
     p = int(xtx_arr.shape[1])
@@ -282,64 +273,25 @@ def _fit_partial_pool_hyperparams(
         mu_species_centered = mu_species - pt.mean(mu_species)
 
         tau_comp = pm.HalfNormal("tau_comp", sigma=float(tau_comp_prior))
-        z = None
-        d = 0
-        if alpha_prior_mode in {"chem_linear", "chem_interaction"}:
-            z_np = np.asarray(comp_embed_zc, dtype=np.float64)
-            d = int(z_np.shape[1])
-            z = pm.Data("comp_embed_zc", z_np)
+        z_np = np.asarray(comp_embed_zc, dtype=np.float64)
+        d = int(z_np.shape[1])
+        z = pm.Data("comp_embed_zc", z_np)
 
-        if alpha_prior_mode in {"chem_linear", "chem_interaction"}:
-            if z is None:
-                raise RuntimeError("Internal error: missing comp_embed_zc Data")
-            theta_alpha = pm.Normal(
-                "theta_alpha", mu=0.0, sigma=float(theta_alpha_prior_sigma), shape=d
-            )
-            delta_comp = pm.Normal("delta_comp", mu=0.0, sigma=tau_comp, shape=n_compounds)
-            delta_comp_centered = delta_comp - pt.mean(delta_comp)
-            alpha_comp = pm.Deterministic(
-                "alpha_comp", pt.dot(z, theta_alpha) + delta_comp_centered
-            )
-        else:
-            alpha_comp = pm.Normal("alpha_comp", mu=0.0, sigma=tau_comp, shape=n_compounds)
+        theta_alpha = pm.Normal(
+            "theta_alpha", mu=0.0, sigma=float(theta_alpha_prior_sigma), shape=d
+        )
+        delta_comp = pm.Normal("delta_comp", mu=0.0, sigma=tau_comp, shape=n_compounds)
+        delta_comp_centered = delta_comp - pt.mean(delta_comp)
+        alpha_comp = pm.Deterministic("alpha_comp", pt.dot(z, theta_alpha) + delta_comp_centered)
         alpha_comp_centered = alpha_comp - pt.mean(alpha_comp)
 
         t0 = pm.Normal("t0", mu=0.0, sigma=float(t0_prior_sigma), initval=float(y_mean0))
         tau_b = pm.HalfNormal("tau_b", sigma=float(tau_b_prior))
 
-        chem_term = pt.zeros((n_groups,), dtype="float64")
-        if alpha_prior_mode == "chem_interaction":
-            if z is None:
-                raise RuntimeError("Internal error: missing comp_embed_zc Data")
-            chem_theta0 = pm.Normal(
-                "chem_theta0", mu=0.0, sigma=float(theta_alpha_prior_sigma), shape=d
-            )
-            chem_tau_theta_supercat = pm.HalfNormal(
-                "chem_tau_theta_supercat", sigma=float(tau_mu_prior)
-            )
-            chem_theta_supercat = pm.Normal(
-                "chem_theta_supercat",
-                mu=chem_theta0[None, :],
-                sigma=chem_tau_theta_supercat,
-                shape=(n_supercats, d),
-            )
-            chem_tau_theta = pm.HalfNormal("chem_tau_theta", sigma=float(tau_mu_prior))
-            chem_theta_species = pm.Normal(
-                "chem_theta_species",
-                mu=chem_theta_supercat[cluster_supercat_idx_data],
-                sigma=chem_tau_theta,
-                shape=(n_clusters, d),
-            )
-            chem_term = pt.sum(
-                chem_theta_species[group_cluster_idx_data] * z[group_comp_idx_data],
-                axis=1,
-            )
-        pm.Deterministic("b_mean_chem_term", chem_term)
         b_mean = (
             t0
             + mu_species_centered[group_cluster_idx_data]
             + alpha_comp_centered[group_comp_idx_data]
-            + chem_term
         )
         b = pm.Normal("b", mu=b_mean, sigma=tau_b, shape=(n_groups,))
 
@@ -477,26 +429,7 @@ def _fit_partial_pool_hyperparams(
         mu_species_mean = np.asarray(post["mu_species"].mean(dim=("chain", "draw")).to_numpy())
         alpha_comp_mean = np.asarray(post["alpha_comp"].mean(dim=("chain", "draw")).to_numpy())
         tau_comp_mean = float(post["tau_comp"].mean(dim=("chain", "draw")).to_numpy())
-        theta_alpha_mean = None
-        if "theta_alpha" in post:
-            theta_alpha_mean = np.asarray(
-                post["theta_alpha"].mean(dim=("chain", "draw")).to_numpy()
-            )
-        chem_theta0_mean = None
-        chem_theta_supercat_mean = None
-        chem_theta_species_mean = None
-        if "chem_theta0" in post:
-            chem_theta0_mean = np.asarray(
-                post["chem_theta0"].mean(dim=("chain", "draw")).to_numpy()
-            )
-        if "chem_theta_supercat" in post:
-            chem_theta_supercat_mean = np.asarray(
-                post["chem_theta_supercat"].mean(dim=("chain", "draw")).to_numpy()
-            )
-        if "chem_theta_species" in post:
-            chem_theta_species_mean = np.asarray(
-                post["chem_theta_species"].mean(dim=("chain", "draw")).to_numpy()
-            )
+        theta_alpha_mean = np.asarray(post["theta_alpha"].mean(dim=("chain", "draw")).to_numpy())
         tau_b_mean = float(post["tau_b"].mean(dim=("chain", "draw")).to_numpy())
         w_species_mean = np.asarray(post["w_species"].mean(dim=("chain", "draw")).to_numpy())
     else:
@@ -507,18 +440,7 @@ def _fit_partial_pool_hyperparams(
         mu_species_mean = np.asarray(map_est["mu_species"], dtype=np.float64)
         alpha_comp_mean = np.asarray(map_est["alpha_comp"], dtype=np.float64)
         tau_comp_mean = float(map_est["tau_comp"])
-        theta_alpha_mean = None
-        if "theta_alpha" in map_est:
-            theta_alpha_mean = np.asarray(map_est["theta_alpha"], dtype=np.float64)
-        chem_theta0_mean = None
-        chem_theta_supercat_mean = None
-        chem_theta_species_mean = None
-        if "chem_theta0" in map_est:
-            chem_theta0_mean = np.asarray(map_est["chem_theta0"], dtype=np.float64)
-        if "chem_theta_supercat" in map_est:
-            chem_theta_supercat_mean = np.asarray(map_est["chem_theta_supercat"], dtype=np.float64)
-        if "chem_theta_species" in map_est:
-            chem_theta_species_mean = np.asarray(map_est["chem_theta_species"], dtype=np.float64)
+        theta_alpha_mean = np.asarray(map_est["theta_alpha"], dtype=np.float64)
         tau_b_mean = float(map_est["tau_b"])
         w_species_mean = np.asarray(map_est["w_species"], dtype=np.float64)
 
@@ -532,18 +454,7 @@ def _fit_partial_pool_hyperparams(
         mu_species_mean=mu_species_mean.astype(np.float64, copy=False),
         alpha_comp_mean=alpha_comp_mean.astype(np.float64, copy=False),
         tau_comp_mean=float(tau_comp_mean),
-        theta_alpha_mean=theta_alpha_mean.astype(np.float64, copy=False)
-        if theta_alpha_mean is not None
-        else None,
-        chem_theta0_mean=chem_theta0_mean.astype(np.float64, copy=False)
-        if chem_theta0_mean is not None
-        else None,
-        chem_theta_supercat_mean=chem_theta_supercat_mean.astype(np.float64, copy=False)
-        if chem_theta_supercat_mean is not None
-        else None,
-        chem_theta_species_mean=chem_theta_species_mean.astype(np.float64, copy=False)
-        if chem_theta_species_mean is not None
-        else None,
+        theta_alpha_mean=theta_alpha_mean.astype(np.float64, copy=False),
         tau_b_mean=float(tau_b_mean),
         w_species_mean=w_species_mean.astype(np.float64, copy=False),
     )
@@ -564,8 +475,7 @@ def train_pymc_partial_pool_ridge_from_csv(
     tau_w_prior: float = 0.5,
     w0_prior_sigma: float = 1.0,
     t0_prior_sigma: float = 10.0,
-    alpha_prior_mode: AlphaPriorMode = "iid",
-    chem_embeddings_path: Path | None = None,
+    chem_embeddings_path: Path = Path("resources/metabolites/embeddings_chemberta_pca20.parquet"),
     theta_alpha_prior_sigma: float = 1.0,
     method: PymcMethod = "advi",
     advi_steps: int = 10_000,
@@ -576,9 +486,6 @@ def train_pymc_partial_pool_ridge_from_csv(
     """Train the partial pooling ridge model from a production RT CSV."""
     seed = int(seed)
     np.random.seed(seed)
-    alpha_prior_mode = str(alpha_prior_mode)  # type: ignore[assignment]
-    if alpha_prior_mode not in {"iid", "chem_linear", "chem_interaction"}:
-        raise ValueError(f"Unknown alpha_prior_mode: {alpha_prior_mode}")
 
     data_csv = Path(data_csv)
     header = pd.read_csv(data_csv, nrows=0)
@@ -697,44 +604,36 @@ def train_pymc_partial_pool_ridge_from_csv(
         comp_ids=comp_ids_unique, comp_id_to_choice=comp_id_to_choice
     )
 
-    comp_embed_zc: np.ndarray | None = None
-    alpha_z_center: np.ndarray | None = None
-    chem_embeddings_path_resolved: Path | None = None
-    if alpha_prior_mode in {"chem_linear", "chem_interaction"}:
-        if chem_embeddings_path is None:
-            raise ValueError(
-                f"alpha_prior_mode={alpha_prior_mode!r} requires chem_embeddings_path to be provided"
-            )
-        chem_embeddings_path_resolved = Path(chem_embeddings_path)
-        if not chem_embeddings_path_resolved.is_absolute():
-            chem_embeddings_path_resolved = (
-                Path(__file__).resolve().parents[3] / chem_embeddings_path_resolved
-            ).resolve()  # noqa: E501
-        emb = load_chemberta_pca20(chem_embeddings_path_resolved)
-        order = np.argsort(emb.chem_id.astype(np.int64), kind="mergesort")
-        chem_ids_sorted = emb.chem_id[order].astype(np.int64, copy=False)
-        features_sorted = emb.features[order].astype(np.float64, copy=False)
+    chem_embeddings_path_resolved = Path(chem_embeddings_path)
+    if not chem_embeddings_path_resolved.is_absolute():
+        chem_embeddings_path_resolved = (
+            Path(__file__).resolve().parents[3] / chem_embeddings_path_resolved
+        ).resolve()
+    emb = load_chemberta_pca20(chem_embeddings_path_resolved)
+    order = np.argsort(emb.chem_id.astype(np.int64), kind="mergesort")
+    chem_ids_sorted = emb.chem_id[order].astype(np.int64, copy=False)
+    features_sorted = emb.features[order].astype(np.float64, copy=False)
 
-        chem = np.asarray(comp_chem_unique, dtype=np.int64)
-        if np.any(chem < 0):
-            missing = sorted(set(int(x) for x in chem[chem < 0].tolist()))
-            raise ValueError(
-                "comp_id->chem_id mapping missing for some compounds "
-                f"(need chem_id for chem-linear alpha prior): {missing[:10]}"
-            )
-        idx = np.searchsorted(chem_ids_sorted, chem)
-        ok = (idx >= 0) & (idx < chem_ids_sorted.size)
-        if ok.any():
-            ok[ok] &= chem_ids_sorted[idx[ok]] == chem[ok]
-        if not bool(np.all(ok)):
-            missing = sorted(set(int(x) for x in chem[~ok].tolist()))
-            raise ValueError(
-                "ChemBERTa embedding missing for some chem_ids in training compounds: "
-                f"{missing[:10]} (n_missing={len(missing)})"
-            )
-        comp_embed = features_sorted[idx]
-        alpha_z_center = np.mean(comp_embed, axis=0).astype(np.float64, copy=False)
-        comp_embed_zc = (comp_embed - alpha_z_center[None, :]).astype(np.float64, copy=False)
+    chem = np.asarray(comp_chem_unique, dtype=np.int64)
+    if np.any(chem < 0):
+        missing = sorted(set(int(x) for x in chem[chem < 0].tolist()))
+        raise ValueError(
+            "comp_id->chem_id mapping missing for some compounds "
+            f"(need chem_id for chem-linear alpha prior): {missing[:10]}"
+        )
+    idx = np.searchsorted(chem_ids_sorted, chem)
+    ok = (idx >= 0) & (idx < chem_ids_sorted.size)
+    if ok.any():
+        ok[ok] &= chem_ids_sorted[idx[ok]] == chem[ok]
+    if not bool(np.all(ok)):
+        missing = sorted(set(int(x) for x in chem[~ok].tolist()))
+        raise ValueError(
+            "ChemBERTa embedding missing for some chem_ids in training compounds: "
+            f"{missing[:10]} (n_missing={len(missing)})"
+        )
+    comp_embed = features_sorted[idx]
+    alpha_z_center = np.mean(comp_embed, axis=0).astype(np.float64, copy=False)
+    comp_embed_zc = (comp_embed - alpha_z_center[None, :]).astype(np.float64, copy=False)
 
     fit = _fit_partial_pool_hyperparams(
         xtx_arr=xtx_arr,
@@ -757,7 +656,6 @@ def train_pymc_partial_pool_ridge_from_csv(
         tau_w_prior=float(tau_w_prior),
         w0_prior_sigma=float(w0_prior_sigma),
         t0_prior_sigma=float(t0_prior_sigma),
-        alpha_prior_mode=alpha_prior_mode,  # type: ignore[arg-type]
         comp_embed_zc=comp_embed_zc,
         theta_alpha_prior_sigma=float(theta_alpha_prior_sigma),
         method=method,
@@ -783,30 +681,9 @@ def train_pymc_partial_pool_ridge_from_csv(
         comp_ids=np.asarray(comp_ids_unique, dtype=np.int64),
         comp_chem_id=np.asarray(comp_chem_unique, dtype=np.int64),
         comp_class=np.asarray(comp_class_unique, dtype=np.int64),
-        alpha_z_center=alpha_z_center.astype(np.float64, copy=False)
-        if alpha_z_center is not None
-        else None,
-        alpha_theta=np.asarray(fit.theta_alpha_mean, dtype=np.float64)
-        if fit.theta_alpha_mean is not None
-        else None,
+        alpha_z_center=alpha_z_center,
+        alpha_theta=np.asarray(fit.theta_alpha_mean, dtype=np.float64),
         tau_comp=float(fit.tau_comp_mean),
-        chem_z_center=alpha_z_center.astype(np.float64, copy=False)
-        if alpha_z_center is not None
-        and (
-            fit.chem_theta0_mean is not None
-            or fit.chem_theta_supercat_mean is not None
-            or fit.chem_theta_species_mean is not None
-        )
-        else None,
-        chem_theta0=np.asarray(fit.chem_theta0_mean, dtype=np.float64)
-        if fit.chem_theta0_mean is not None
-        else None,
-        chem_theta_supercat=np.asarray(fit.chem_theta_supercat_mean, dtype=np.float64)
-        if fit.chem_theta_supercat_mean is not None
-        else None,
-        chem_theta_cluster=np.asarray(fit.chem_theta_species_mean, dtype=np.float64)
-        if fit.chem_theta_species_mean is not None
-        else None,
         t0=float(t0),
         mu_cluster=np.asarray(mu_species, dtype=np.float64),
         alpha_comp=np.asarray(alpha_comp, dtype=np.float64),
@@ -821,23 +698,6 @@ def train_pymc_partial_pool_ridge_from_csv(
         + mu_species[np.asarray(group_cluster_idx, dtype=np.int64)]
         + alpha_comp[np.asarray(group_comp_idx, dtype=np.int64)]
     )
-    if fit.chem_theta_species_mean is not None and comp_embed_zc is not None:
-        chem_theta_cluster = np.asarray(fit.chem_theta_species_mean, dtype=np.float64)
-        zc = np.asarray(comp_embed_zc, dtype=np.float64)
-        if (
-            chem_theta_cluster.ndim != 2
-            or zc.ndim != 2
-            or chem_theta_cluster.shape[1] != zc.shape[1]
-        ):
-            raise RuntimeError(
-                "Internal error: chem_theta_species_mean and comp_embed_zc shape mismatch "
-                f"{chem_theta_cluster.shape} vs {zc.shape}"
-            )
-        b_prior_mean = b_prior_mean + np.sum(
-            chem_theta_cluster[np.asarray(group_cluster_idx, dtype=np.int64)]
-            * zc[np.asarray(group_comp_idx, dtype=np.int64)],
-            axis=1,
-        )
     slope_mean = np.asarray(fit.w_species_mean, dtype=np.float64)[
         np.asarray(group_cluster_idx, dtype=np.int64)
     ]
@@ -891,10 +751,7 @@ def train_pymc_partial_pool_ridge_from_csv(
         sigma_y_prior=float(sigma_y_prior),
         tau_mu_prior=float(tau_mu_prior),
         tau_comp_prior=float(tau_comp_prior),
-        alpha_prior_mode=alpha_prior_mode,  # type: ignore[arg-type]
-        chem_embeddings_path=str(chem_embeddings_path_resolved)
-        if chem_embeddings_path_resolved is not None
-        else (str(chem_embeddings_path) if chem_embeddings_path is not None else None),
+        chem_embeddings_path=str(chem_embeddings_path_resolved),
         theta_alpha_prior_sigma=float(theta_alpha_prior_sigma),
         tau_b_prior=float(tau_b_prior),
         tau_w_prior=float(tau_w_prior),
@@ -952,7 +809,6 @@ def write_pymc_partial_pool_ridge_artifacts(
         "sigma_y_prior": float(artifacts.sigma_y_prior),
         "tau_mu_prior": float(artifacts.tau_mu_prior),
         "tau_comp_prior": float(artifacts.tau_comp_prior),
-        "alpha_prior_mode": str(artifacts.alpha_prior_mode),
         "chem_embeddings_path": artifacts.chem_embeddings_path,
         "theta_alpha_prior_sigma": float(artifacts.theta_alpha_prior_sigma),
         "tau_b_prior": float(artifacts.tau_b_prior),

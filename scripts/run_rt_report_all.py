@@ -190,7 +190,7 @@ def parse_args() -> argparse.Namespace:
         "--theta-alpha-prior-sigma",
         type=float,
         default=1.0,
-        help="Prior sigma for theta_alpha (chem_linear/chem_interaction).",
+        help="Prior sigma for theta_alpha in the chem-linear compound prior.",
     )
     parser.add_argument(
         "--unseen-advi-steps",
@@ -249,8 +249,6 @@ def main() -> None:
             "--run-dir",
             str(run_dir),
             "--no-eval",
-            "--partial-alpha-prior-mode",
-            "chem_linear",
             "--chem-embeddings-path",
             str(chem_embeddings_path),
             "--theta-alpha-prior-sigma",
@@ -321,8 +319,6 @@ def main() -> None:
                 "5",
                 "--top-comp-ids",
                 "100",
-                "--partial-alpha-prior-mode",
-                "chem_linear",
                 "--chem-embeddings-path",
                 str(chem_embeddings_path),
                 "--theta-alpha-prior-sigma",
@@ -366,8 +362,6 @@ def main() -> None:
                 str(int(seed)),
                 "--report-minimal",
                 "--include-pymc",
-                "--pymc-alpha-prior-mode",
-                "chem_linear",
                 "--theta-alpha-prior-sigma",
                 str(float(args.theta_alpha_prior_sigma)),
             ]

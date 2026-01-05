@@ -103,13 +103,6 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
-        "--pymc-alpha-prior-mode",
-        type=str,
-        choices=["chem_linear", "chem_interaction"],
-        default="chem_linear",
-        help="Compound prior mode for PyMC partial pooling (required for true zero-shot).",
-    )
-    p.add_argument(
         "--pymc-advi-steps",
         type=int,
         default=5000,
@@ -119,7 +112,7 @@ def parse_args() -> argparse.Namespace:
         "--theta-alpha-prior-sigma",
         type=float,
         default=1.0,
-        help="Prior sigma for theta_alpha (chem_* modes).",
+        help="Prior sigma for theta_alpha in the chem-linear compound prior.",
     )
     p.add_argument(
         "--report-minimal",
@@ -422,16 +415,9 @@ def _fit_and_eval_pymc_partial_pool(
     test_csv: Path,
     emb_path: Path,
     seed: int,
-    alpha_prior_mode: str,
     theta_alpha_prior_sigma: float,
     advi_steps: int,
 ) -> dict[str, Any]:
-    alpha_prior_mode = str(alpha_prior_mode)
-    if alpha_prior_mode not in {"chem_linear", "chem_interaction"}:
-        raise ValueError(
-            "PyMC zero-shot requires alpha_prior_mode in {'chem_linear', 'chem_interaction'}"
-        )
-
     pymc_out = out_dir / "pymc_partial_pool"
     pymc_out.mkdir(parents=True, exist_ok=True)
 
@@ -442,7 +428,6 @@ def _fit_and_eval_pymc_partial_pool(
         feature_center="global",
         lambda_slopes=3e-4,
         sigma_y_prior=0.05,
-        alpha_prior_mode=alpha_prior_mode,  # type: ignore[arg-type]
         chem_embeddings_path=emb_path,
         theta_alpha_prior_sigma=float(theta_alpha_prior_sigma),
         method="advi",
@@ -455,7 +440,7 @@ def _fit_and_eval_pymc_partial_pool(
 
     eval_dir = pymc_out / "eval"
     eval_dir.mkdir(parents=True, exist_ok=True)
-    label = "pymc_partial_pool_embeddings"
+    label = "pymc_partial_pool"
     _run(
         [
             sys.executable,
@@ -471,8 +456,6 @@ def _fit_and_eval_pymc_partial_pool(
             str(eval_dir),
             "--label",
             label,
-            "--alpha-backoff-mode",
-            "embeddings",
             "--chem-embeddings-path",
             str(emb_path),
             "--log-every-chunks",
@@ -487,7 +470,7 @@ def _fit_and_eval_pymc_partial_pool(
     d = json.loads(metrics_json.read_text())
     m = d.get("metrics_all", {})
     return {
-        "mode": f"pymc_partial_pool_{alpha_prior_mode}",
+        "mode": "pymc_partial_pool_chem_linear",
         "rmse": float(m.get("rmse", float("nan"))),
         "mae": float(m.get("mae", float("nan"))),
         "coverage_95": float(m.get("coverage_95", float("nan"))),
@@ -621,7 +604,6 @@ def main() -> None:
                 test_csv=test_csv,
                 emb_path=emb_path,
                 seed=int(args.seed),
-                alpha_prior_mode=str(args.pymc_alpha_prior_mode),
                 theta_alpha_prior_sigma=float(args.theta_alpha_prior_sigma),
                 advi_steps=int(args.pymc_advi_steps),
             )
@@ -641,7 +623,6 @@ def main() -> None:
         "report_minimal": bool(args.report_minimal),
         "include_mlp": bool(args.include_mlp),
         "include_pymc": bool(args.include_pymc),
-        "pymc_alpha_prior_mode": str(args.pymc_alpha_prior_mode),
         "pymc_advi_steps": int(args.pymc_advi_steps),
         "theta_alpha_prior_sigma": float(args.theta_alpha_prior_sigma),
         "species_clusters_train": clusters.tolist(),

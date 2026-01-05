@@ -347,14 +347,10 @@ class PartialPoolBackoffSummaries:
     tau_b: float  # prior sd for per-(species, comp_id) intercepts
     sigma2: float  # noise variance (shared)
     lambda_slopes: float  # ridge precision for slopes (shared scalar)
-    # Optional single-model chemistry regression for alpha_comp backoff (unseen compounds).
-    alpha_z_center: np.ndarray | None = None  # (D,) float; mean chem embedding used for centering
-    alpha_theta: np.ndarray | None = None  # (D,) float; embedding->alpha linear weights
-    tau_comp: float | None = None  # sd for per-compound residual offsets (delta_comp)
-    chem_z_center: np.ndarray | None = None  # (D,) float; mean chem embedding used for centering
-    chem_theta0: np.ndarray | None = None  # (D,) float; global chem interaction weights
-    chem_theta_supercat: np.ndarray | None = None  # (S, D) float; supercategory chem weights
-    chem_theta_cluster: np.ndarray | None = None  # (C, D) float; species chem weights
+    # Single-model chemistry regression for alpha_comp backoff (unseen compounds).
+    alpha_z_center: np.ndarray  # (D,) float; mean chem embedding used for centering
+    alpha_theta: np.ndarray  # (D,) float; embedding->alpha linear weights
+    tau_comp: float  # sd for per-compound residual offsets (delta_comp)
 
     def save_npz(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -365,9 +361,7 @@ class PartialPoolBackoffSummaries:
             "comp_ids": np.asarray(self.comp_ids, dtype=np.int64),
             "comp_chem_id": np.asarray(self.comp_chem_id, dtype=np.int64),
             "comp_class": np.asarray(self.comp_class, dtype=np.int64),
-            "tau_comp": np.asarray(float(self.tau_comp), dtype=np.float32)
-            if self.tau_comp is not None
-            else np.asarray(np.nan, dtype=np.float32),
+            "tau_comp": np.asarray(float(self.tau_comp), dtype=np.float32),
             "t0": np.asarray(float(self.t0), dtype=np.float32),
             "mu_cluster": np.asarray(self.mu_cluster, dtype=np.float32),
             "alpha_comp": np.asarray(self.alpha_comp, dtype=np.float32),
@@ -375,67 +369,37 @@ class PartialPoolBackoffSummaries:
             "tau_b": np.asarray(float(self.tau_b), dtype=np.float32),
             "sigma2": np.asarray(float(self.sigma2), dtype=np.float32),
             "lambda_slopes": np.asarray(float(self.lambda_slopes), dtype=np.float32),
+            "alpha_z_center": np.asarray(self.alpha_z_center, dtype=np.float32),
+            "alpha_theta": np.asarray(self.alpha_theta, dtype=np.float32),
         }
-        if self.alpha_z_center is not None:
-            payload["alpha_z_center"] = np.asarray(self.alpha_z_center, dtype=np.float32)
-        if self.alpha_theta is not None:
-            payload["alpha_theta"] = np.asarray(self.alpha_theta, dtype=np.float32)
-        if self.chem_z_center is not None:
-            payload["chem_z_center"] = np.asarray(self.chem_z_center, dtype=np.float32)
-        if self.chem_theta0 is not None:
-            payload["chem_theta0"] = np.asarray(self.chem_theta0, dtype=np.float32)
-        if self.chem_theta_supercat is not None:
-            payload["chem_theta_supercat"] = np.asarray(self.chem_theta_supercat, dtype=np.float32)
-        if self.chem_theta_cluster is not None:
-            payload["chem_theta_cluster"] = np.asarray(self.chem_theta_cluster, dtype=np.float32)
         np.savez_compressed(path, **payload)
 
     @staticmethod
     def load_npz(path: Path) -> "PartialPoolBackoffSummaries":
         npz = np.load(path, allow_pickle=True)
         feature_names = tuple(str(s) for s in npz["feature_names"].tolist())
-        comp_chem_id = None
-        if "comp_chem_id" in npz.files:
-            comp_chem_id = np.asarray(npz["comp_chem_id"], dtype=np.int64)
-        alpha_z_center = None
-        if "alpha_z_center" in npz.files:
-            alpha_z_center = np.asarray(npz["alpha_z_center"], dtype=float)
-        alpha_theta = None
-        if "alpha_theta" in npz.files:
-            alpha_theta = np.asarray(npz["alpha_theta"], dtype=float)
-        chem_z_center = None
-        if "chem_z_center" in npz.files:
-            chem_z_center = np.asarray(npz["chem_z_center"], dtype=float)
-        chem_theta0 = None
-        if "chem_theta0" in npz.files:
-            chem_theta0 = np.asarray(npz["chem_theta0"], dtype=float)
-        chem_theta_supercat = None
-        if "chem_theta_supercat" in npz.files:
-            chem_theta_supercat = np.asarray(npz["chem_theta_supercat"], dtype=float)
-        chem_theta_cluster = None
-        if "chem_theta_cluster" in npz.files:
-            chem_theta_cluster = np.asarray(npz["chem_theta_cluster"], dtype=float)
-        tau_comp = None
-        if "tau_comp" in npz.files:
-            tau_comp_val = float(npz["tau_comp"])
-            if np.isfinite(tau_comp_val):
-                tau_comp = tau_comp_val
+        if "alpha_z_center" not in npz.files or "alpha_theta" not in npz.files:
+            raise ValueError(
+                "Backoff artifact missing chem-linear parameters (alpha_z_center/alpha_theta). "
+                "Re-train the partial pooling model with chem-linear enabled."
+            )
+        comp_ids = np.asarray(npz["comp_ids"], dtype=np.int64)
+        comp_chem_id = np.asarray(npz["comp_chem_id"], dtype=np.int64)
+        if comp_chem_id.shape != comp_ids.shape:
+            comp_chem_id = np.full(comp_ids.shape, -1, dtype=np.int64)
+        tau_comp_val = float(npz["tau_comp"]) if "tau_comp" in npz.files else float("nan")
+        if not np.isfinite(tau_comp_val):
+            raise ValueError("Backoff artifact missing tau_comp for chem-linear alpha prior.")
         return PartialPoolBackoffSummaries(
             feature_names=feature_names,
             cluster_ids=np.asarray(npz["cluster_ids"], dtype=np.int64),
             cluster_supercat_id=np.asarray(npz["cluster_supercat_id"], dtype=np.int64),
-            comp_ids=np.asarray(npz["comp_ids"], dtype=np.int64),
-            comp_chem_id=comp_chem_id
-            if comp_chem_id is not None
-            else np.full(np.asarray(npz["comp_ids"], dtype=np.int64).shape, -1, dtype=np.int64),
+            comp_ids=comp_ids,
+            comp_chem_id=comp_chem_id,
             comp_class=np.asarray(npz["comp_class"], dtype=np.int64),
-            alpha_z_center=alpha_z_center,
-            alpha_theta=alpha_theta,
-            tau_comp=tau_comp,
-            chem_z_center=chem_z_center,
-            chem_theta0=chem_theta0,
-            chem_theta_supercat=chem_theta_supercat,
-            chem_theta_cluster=chem_theta_cluster,
+            alpha_z_center=np.asarray(npz["alpha_z_center"], dtype=float),
+            alpha_theta=np.asarray(npz["alpha_theta"], dtype=float),
+            tau_comp=float(tau_comp_val),
             t0=float(npz["t0"]),
             mu_cluster=np.asarray(npz["mu_cluster"], dtype=float),
             alpha_comp=np.asarray(npz["alpha_comp"], dtype=float),

@@ -22,6 +22,9 @@ def test_partial_pool_backoff_summaries_roundtrip(tmp_path: Path) -> None:
         tau_b=0.3,
         sigma2=0.01,
         lambda_slopes=1e-3,
+        alpha_z_center=np.asarray([0.1, -0.2], dtype=np.float64),
+        alpha_theta=np.asarray([0.3, 0.4], dtype=np.float64),
+        tau_comp=0.25,
     )
 
     path = tmp_path / "partial_pool_backoff.npz"
@@ -41,3 +44,6 @@ def test_partial_pool_backoff_summaries_roundtrip(tmp_path: Path) -> None:
     np.testing.assert_allclose(loaded.tau_b, art.tau_b)
     np.testing.assert_allclose(loaded.sigma2, art.sigma2)
     np.testing.assert_allclose(loaded.lambda_slopes, art.lambda_slopes)
+    np.testing.assert_allclose(loaded.alpha_z_center, art.alpha_z_center)
+    np.testing.assert_allclose(loaded.alpha_theta, art.alpha_theta)
+    np.testing.assert_allclose(loaded.tau_comp, art.tau_comp)
