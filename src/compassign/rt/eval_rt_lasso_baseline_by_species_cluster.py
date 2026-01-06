@@ -7,6 +7,8 @@ It:
   - Streams an RT production CSV in chunks.
   - For each row with a matching lasso model, computes a point prediction and a window-based
     interval, then aggregates global and per-species-cluster metrics.
+    The evaluated window matches the production baseline behavior (Hippopotamus/Sally):
+      effective_half_width = window_multiplier * max(window, min_window)
   - Writes:
       results/rt_eval_lasso_by_species_cluster_<label>.csv
       results/rt_eval_lasso_<label>.json
@@ -78,8 +80,8 @@ class AggStats:
                 "n_obs": 0,
                 "rmse": float("nan"),
                 "mae": float("nan"),
-                "coverage_95": float("nan"),
-                "interval_width_mean": float("nan"),
+                "coverage_window": float("nan"),
+                "window_width_mean": float("nan"),
             }
         rmse = float(np.sqrt(self.sum_sq_err / self.n))
         mae = float(self.sum_abs_err / self.n)
@@ -89,8 +91,8 @@ class AggStats:
             "n_obs": int(self.n),
             "rmse": rmse,
             "mae": mae,
-            "coverage_95": cov,
-            "interval_width_mean": width_mean,
+            "coverage_window": cov,
+            "window_width_mean": width_mean,
         }
 
 
@@ -151,6 +153,24 @@ def parse_args() -> argparse.Namespace:
         "--drop-es",
         action="store_true",
         help="Ignore ES_* covariates by zeroing them before prediction (what-if analysis).",
+    )
+    parser.add_argument(
+        "--window-multiplier",
+        type=float,
+        default=4.0,
+        help=(
+            "Multiply the stored per-model window by this factor before computing coverage/width. "
+            "Matches the production Sally default window_multiplier."
+        ),
+    )
+    parser.add_argument(
+        "--min-window",
+        type=float,
+        default=0.001,
+        help=(
+            "Clamp the stored per-model window to at least this value before applying "
+            "--window-multiplier (Sally uses max(window, 0.001))."
+        ),
     )
     parser.add_argument(
         "--support-map-csv",
@@ -318,6 +338,12 @@ def _load_sampleset_to_supercategory(mapping_csv: Path) -> Dict[int, int]:
 
 def main() -> None:
     args = parse_args()
+    if float(args.window_multiplier) <= 0.0:
+        raise SystemExit("--window-multiplier must be > 0")
+    if float(args.min_window) < 0.0:
+        raise SystemExit("--min-window must be >= 0")
+    window_multiplier = float(args.window_multiplier)
+    min_window = float(args.min_window)
 
     test_csv = args.test_csv
     if not test_csv.is_absolute():
@@ -462,8 +488,9 @@ def main() -> None:
             err = pred[modeled] - y_true[modeled]
             sq_err = np.square(err)
             abs_err = np.abs(err)
-            covered = abs_err <= win[modeled]
-            interval_width = 2.0 * win[modeled]
+            half_width = window_multiplier * np.maximum(win[modeled], min_window)
+            covered = abs_err <= half_width
+            interval_width = 2.0 * half_width
             global_stats.update(sq_err, abs_err, covered, interval_width)
             evaluated_rows += int(err.size)
 
@@ -509,7 +536,7 @@ def main() -> None:
     )
     print(
         f"[lasso_cluster] Global: n={global_metrics['n_obs']:,}, RMSE={global_metrics['rmse']:.3f}, "
-        f"MAE={global_metrics['mae']:.3f}, coverage95={global_metrics['coverage_95']:.3f}"
+        f"MAE={global_metrics['mae']:.3f}, coverage_window={global_metrics['coverage_window']:.3f}"
     )
 
     out_json = results_dir / f"rt_eval_lasso{label_suffix}.json"
@@ -525,6 +552,8 @@ def main() -> None:
                 "models_root": str(Path(args.models_root)),
                 "species_mapping_csv": str(mapping_csv),
                 "drop_es": bool(args.drop_es),
+                "window_multiplier": float(window_multiplier),
+                "min_window": float(min_window),
                 "skipped_no_super": int(skipped_no_super),
                 "skipped_no_model": int(skipped_no_model),
                 "support_map_csv": support_map_csv_str,
@@ -554,8 +583,8 @@ def main() -> None:
                     "n_obs_test": int(m["n_obs"]),
                     "rmse": float(m["rmse"]),
                     "mae": float(m["mae"]),
-                    "coverage_95": float(m["coverage_95"]),
-                    "interval_width_mean": float(m["interval_width_mean"]),
+                    "coverage_window": float(m["coverage_window"]),
+                    "window_width_mean": float(m["window_width_mean"]),
                 }
             )
         support_df = pd.DataFrame(rows_support)
