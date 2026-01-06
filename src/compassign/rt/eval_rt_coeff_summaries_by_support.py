@@ -108,6 +108,16 @@ def parse_args() -> argparse.Namespace:
         default=20,
         help="Print a progress line every N chunks (0 disables).",
     )
+    parser.add_argument(
+        "--common-support-map-csv",
+        type=Path,
+        default=None,
+        help=(
+            "Optional common support-bin map keyed by (species_cluster, comp_id) used for support-bin metrics. "
+            "When set, support-bin plots use the same bins across all models, regardless of the model's native "
+            "grouping (e.g. species vs species_cluster)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -160,6 +170,44 @@ class SumStats:
             "pred_std_mean": pred_std_mean,
             "interval_width_mean": width_mean,
         }
+
+
+def _load_common_support_bin_map(
+    support_map_csv: Path, *, support_edges: list[int]
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
+    if not support_map_csv.exists():
+        raise SystemExit(f"Common support map CSV not found: {support_map_csv}")
+    df = pd.read_csv(support_map_csv)
+    if "support_bin" not in df.columns:
+        raise SystemExit(f"Common support map CSV missing support_bin column: {support_map_csv}")
+
+    labels = _bin_labels(support_edges)
+    name_to_idx = {name: i for i, name in enumerate(labels)}
+
+    if "group_key" in df.columns:
+        keys = df["group_key"].to_numpy(dtype=np.int64, copy=False)
+    elif {"species_cluster", "comp_id"}.issubset(df.columns):
+        species_cluster = df["species_cluster"].to_numpy(dtype=np.int64, copy=False)
+        comp_id = df["comp_id"].to_numpy(dtype=np.int64, copy=False)
+        keys = (species_cluster.astype(np.int64) << 32) + comp_id.astype(np.int64)
+    else:
+        raise SystemExit(
+            f"Common support map CSV must contain either group_key or (species_cluster, comp_id): {support_map_csv}"
+        )
+
+    bin_name = df["support_bin"].astype(str).to_numpy(copy=False)
+    bin_idx = np.asarray([name_to_idx.get(str(x), -1) for x in bin_name], dtype=np.int16)
+    keep = bin_idx >= 0
+    keys = keys[keep]
+    bin_idx = bin_idx[keep]
+
+    order = np.argsort(keys)
+    keys_sorted = keys[order]
+    bin_idx_sorted = bin_idx[order]
+    n_groups_by_bin = np.bincount(bin_idx_sorted.astype(np.int64), minlength=len(labels)).astype(
+        np.int64
+    )
+    return keys_sorted, bin_idx_sorted, n_groups_by_bin, labels
 
 
 def _default_output_dir(coeff_npz: Path) -> Path:
@@ -434,8 +482,29 @@ def main() -> None:
         raise SystemExit(f"CSV missing required run covariate columns: {missing_feats}")
 
     usecols = list(dict.fromkeys([*required_cols, *raw_deps]))
+    common_support_col = "species_cluster"
+    if args.common_support_map_csv is not None and common_support_col not in usecols:
+        usecols.append(common_support_col)
 
     global_stats = SumStats()
+    common_support_keys: np.ndarray | None = None
+    common_support_bin_idx: np.ndarray | None = None
+    common_n_groups_by_bin: np.ndarray | None = None
+    common_support_labels: list[str] | None = None
+    common_support_stats: list[SumStats] | None = None
+    common_support_seen: np.ndarray | None = None
+    skipped_missing_common_support = 0
+
+    if args.common_support_map_csv is not None:
+        support_edges = _parse_support_bins(args.support_bins)
+        (
+            common_support_keys,
+            common_support_bin_idx,
+            common_n_groups_by_bin,
+            common_support_labels,
+        ) = _load_common_support_bin_map(args.common_support_map_csv, support_edges=support_edges)
+        common_support_stats = [SumStats() for _ in common_support_labels]
+        common_support_seen = np.zeros((common_support_keys.size,), dtype=bool)
 
     n_groups = int(keys.size)
     group_n = np.zeros((n_groups,), dtype=np.int64)
@@ -517,6 +586,42 @@ def main() -> None:
             err=err, covered=covered, pred_std=pred_std, interval_width=interval_width
         )
 
+        if (
+            common_support_keys is not None
+            and common_support_bin_idx is not None
+            and common_support_labels is not None
+            and common_support_stats is not None
+            and common_support_seen is not None
+        ):
+            species_cluster_arr = (
+                chunk[common_support_col].astype(int).to_numpy(dtype=np.int64, copy=False)
+            )
+            key_common = (species_cluster_arr << np.int64(32)) + comp_arr
+            idx_common = np.searchsorted(common_support_keys, key_common)
+            ok_common = (idx_common >= 0) & (idx_common < common_support_keys.size)
+            if ok_common.any():
+                ok_common[ok_common] &= (
+                    common_support_keys[idx_common[ok_common]] == key_common[ok_common]
+                )
+            skipped_missing_common_support += int((~ok_common).sum())
+            if ok_common.any():
+                idx_common_ok = idx_common[ok_common].astype(np.int64, copy=False)
+                common_support_seen[idx_common_ok] = True
+                bins = common_support_bin_idx[idx_common_ok].astype(np.int16, copy=False)
+                err_ok = err[ok_common]
+                covered_ok = covered[ok_common]
+                pred_std_ok = pred_std[ok_common]
+                width_ok = interval_width[ok_common]
+                for b in np.unique(bins).tolist():
+                    b_int = int(b)
+                    mask = bins == b_int
+                    common_support_stats[b_int].update(
+                        err=err_ok[mask],
+                        covered=covered_ok[mask],
+                        pred_std=pred_std_ok[mask],
+                        interval_width=width_ok[mask],
+                    )
+
         np.add.at(group_n, idx_ok, 1)
         np.add.at(group_sum_sq, idx_ok, np.square(err))
         np.add.at(group_sum_abs, idx_ok, np.abs(err))
@@ -572,48 +677,78 @@ def main() -> None:
     global_metrics = global_stats.to_metrics()
 
     support_rows = []
-    for bin_i, label in enumerate(labels):
-        g_mask = (support_idx == int(bin_i)) & ok_g
-        if not np.any(g_mask):
+    if common_support_labels is not None and common_support_stats is not None:
+        if (
+            common_n_groups_by_bin is None
+            or common_support_seen is None
+            or common_support_bin_idx is None
+        ):
+            raise SystemExit("Internal error: common support-bin state missing")
+        for bin_i, label in enumerate(common_support_labels):
+            stats = common_support_stats[int(bin_i)]
+            m = stats.to_metrics()
+            n_groups = int(common_n_groups_by_bin[int(bin_i)])
+            n_groups_with_test = int(
+                np.sum(common_support_seen & (common_support_bin_idx == int(bin_i)))
+            )
+            g_stats = _group_rmse_stats(np.array([], dtype=np.float64))
+            support_rows.append(
+                {
+                    "support_bin": label,
+                    "n_groups": n_groups,
+                    "n_groups_with_test": n_groups_with_test,
+                    "n_obs_test": int(m["n_obs"]),
+                    "rmse": float(m["rmse"]),
+                    "mae": float(m["mae"]),
+                    "coverage_95": float(m["coverage_95"]),
+                    "pred_std_mean": float(m["pred_std_mean"]),
+                    "interval_width_mean": float(m["interval_width_mean"]),
+                    **g_stats,
+                }
+            )
+    else:
+        for bin_i, label in enumerate(labels):
+            g_mask = (support_idx == int(bin_i)) & ok_g
+            if not np.any(g_mask):
+                support_rows.append(
+                    {
+                        "support_bin": label,
+                        "n_groups": int(np.sum(support_idx == int(bin_i))),
+                        "n_groups_with_test": 0,
+                        "n_obs_test": 0,
+                        "rmse": float("nan"),
+                        "mae": float("nan"),
+                        "coverage_95": float("nan"),
+                        **_group_rmse_stats(np.array([], dtype=np.float64)),
+                    }
+                )
+                continue
+            n_bin = int(np.sum(group_n[g_mask]))
+            sum_sq = float(np.sum(group_sum_sq[g_mask]))
+            sum_abs = float(np.sum(group_sum_abs[g_mask]))
+            sum_cov = float(np.sum(group_sum_cov[g_mask]))
+            sum_std = float(np.sum(group_sum_pred_std[g_mask]))
+            sum_width = float(np.sum(group_sum_interval_width[g_mask]))
+            row_rmse = float(np.sqrt(sum_sq / n_bin)) if n_bin > 0 else float("nan")
+            row_mae = float(sum_abs / n_bin) if n_bin > 0 else float("nan")
+            row_cov = float(sum_cov / n_bin) if n_bin > 0 else float("nan")
+            row_std_mean = float(sum_std / n_bin) if n_bin > 0 else float("nan")
+            row_width_mean = float(sum_width / n_bin) if n_bin > 0 else float("nan")
+            g_stats = _group_rmse_stats(group_rmse[g_mask])
             support_rows.append(
                 {
                     "support_bin": label,
                     "n_groups": int(np.sum(support_idx == int(bin_i))),
-                    "n_groups_with_test": 0,
-                    "n_obs_test": 0,
-                    "rmse": float("nan"),
-                    "mae": float("nan"),
-                    "coverage_95": float("nan"),
-                    **_group_rmse_stats(np.array([], dtype=np.float64)),
+                    "n_groups_with_test": int(np.sum(g_mask)),
+                    "n_obs_test": int(n_bin),
+                    "rmse": row_rmse,
+                    "mae": row_mae,
+                    "coverage_95": row_cov,
+                    "pred_std_mean": row_std_mean,
+                    "interval_width_mean": row_width_mean,
+                    **g_stats,
                 }
             )
-            continue
-        n_bin = int(np.sum(group_n[g_mask]))
-        sum_sq = float(np.sum(group_sum_sq[g_mask]))
-        sum_abs = float(np.sum(group_sum_abs[g_mask]))
-        sum_cov = float(np.sum(group_sum_cov[g_mask]))
-        sum_std = float(np.sum(group_sum_pred_std[g_mask]))
-        sum_width = float(np.sum(group_sum_interval_width[g_mask]))
-        row_rmse = float(np.sqrt(sum_sq / n_bin)) if n_bin > 0 else float("nan")
-        row_mae = float(sum_abs / n_bin) if n_bin > 0 else float("nan")
-        row_cov = float(sum_cov / n_bin) if n_bin > 0 else float("nan")
-        row_std_mean = float(sum_std / n_bin) if n_bin > 0 else float("nan")
-        row_width_mean = float(sum_width / n_bin) if n_bin > 0 else float("nan")
-        g_stats = _group_rmse_stats(group_rmse[g_mask])
-        support_rows.append(
-            {
-                "support_bin": label,
-                "n_groups": int(np.sum(support_idx == int(bin_i))),
-                "n_groups_with_test": int(np.sum(g_mask)),
-                "n_obs_test": int(n_bin),
-                "rmse": row_rmse,
-                "mae": row_mae,
-                "coverage_95": row_cov,
-                "pred_std_mean": row_std_mean,
-                "interval_width_mean": row_width_mean,
-                **g_stats,
-            }
-        )
 
     # Per-group CSV
     group_df_dict: dict[str, object] = {
@@ -651,6 +786,12 @@ def main() -> None:
                 "group_col": group_col,
                 "support_bins": support_edges,
                 "support_metrics": support_rows,
+                "common_support_map_csv": (
+                    None
+                    if args.common_support_map_csv is None
+                    else str(Path(args.common_support_map_csv).resolve())
+                ),
+                "skipped_missing_common_support_bin": int(skipped_missing_common_support),
                 "coeff_npz": str(coeff_npz),
                 "test_csv": str(test_csv),
             },

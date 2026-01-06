@@ -9,6 +9,16 @@
 \usepackage{subcaption}
 \usepackage{longtable}
 \usepackage{fontspec}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, backgrounds, calc, fit, positioning}
+
+\tikzset{
+  rtarrow/.style={->, >=Stealth, thick},
+  rtlatent/.style={circle, draw, thick, minimum size=18pt, inner sep=1pt},
+  rtobs/.style={rtlatent, fill=gray!20},
+  rtconst/.style={rectangle, draw, thick, rounded corners, inner sep=2pt, minimum height=16pt},
+  rtplate/.style={draw, rounded corners, dashed, inner sep=6pt},
+}
 
 \setmainfont{Times New Roman}
 \setmonofont{Menlo}
@@ -119,6 +129,85 @@ and we fit one linear regression per group:
 
 The model becomes useful in the long tail because we do \emph{not} fit each $b_{c,k}$ and $w_{c,k,1:p}$ independently:
 we place hierarchical (partially pooled) priors on intercepts and slope means, and we tie compound effects to chemistry.
+
+\begin{figure}[H]
+\centering
+\small
+\begin{tikzpicture}
+  % Species / supercategory hierarchy (intercepts + slope means).
+  \node[rtlatent] (mu_s) {$\mu_s$};
+  \node[rtlatent, below=12mm of mu_s] (mu_c) {$\mu_c$};
+  \node[rtlatent, above=12mm of mu_s] (tau_mu_sc) {$\tau_{\mu,\mathrm{supercat}}$};
+  \node[rtlatent, left=18mm of mu_c] (tau_mu_s) {$\tau_{\mu,s}$};
+
+  \node[rtlatent, below=16mm of mu_c] (m_s) {$m_s$};
+  \node[rtlatent, below=16mm of m_s] (m_c) {$m_c$};
+  \node[rtlatent, left=18mm of m_s] (tau_w_sc) {$\tau_{w,\mathrm{supercat}}$};
+  \node[rtlatent, left=18mm of m_c] (tau_w_s) {$\tau_{w,s}$};
+  \node[rtlatent, right=22mm of m_s] (w0) {$w_0$};
+
+  % Group-level coefficients (per (species, compound)).
+  \node[rtlatent, right=46mm of mu_c] (b) {$b_{c,k}$};
+  \node[rtlatent, right=22mm of b] (w) {$w_{c,k}$};
+  \node[rtlatent, above=12mm of b] (t0) {$t_0$};
+  \node[rtlatent, above left=10mm and 18mm of b] (tau_b) {$\tau_b$};
+  \node[rtconst, right=22mm of w] (lambda) {$\lambda_{\mathrm{slopes}}$};
+
+  % Chemistry-informed compound effects.
+  \node[rtlatent, above right=10mm and 18mm of b] (alpha) {$\alpha_k$};
+  \node[rtlatent, above=12mm of alpha] (delta) {$\delta_k$};
+  \node[rtlatent, left=18mm of delta] (tau_comp) {$\tau_{\mathrm{comp}}$};
+  \node[rtconst, right=18mm of alpha] (z) {$z_{h(k)}$};
+  \node[rtlatent, above=12mm of z] (theta) {$\theta_\alpha$};
+
+  % Observation model.
+  \coordinate (bw_mid) at ($(b)!0.5!(w)$);
+  \node[rtobs, below=22mm of bw_mid] (y) {$y_i$};
+  \node[rtconst, left=18mm of y] (x) {$x_i$};
+  \node[rtlatent, right=18mm of y] (sigma_y) {$\sigma_y$};
+
+  % Edges.
+  \path[rtarrow]
+    (tau_mu_sc) edge (mu_s)
+    (mu_s) edge (mu_c)
+    (tau_mu_s) edge (mu_c)
+
+    (w0) edge (m_s)
+    (tau_w_sc) edge (m_s)
+    (m_s) edge (m_c)
+    (tau_w_s) edge (m_c)
+
+    (t0) edge (b)
+    (tau_b) edge (b)
+    (mu_c) edge (b)
+    (alpha) edge (b)
+
+    (m_c) edge[out=0, in=235, looseness=1.25] (w)
+    (lambda) edge (w)
+
+    (x) edge (y)
+    (b) edge (y)
+    (w) edge (y)
+    (sigma_y) edge (y)
+    (sigma_y) edge[bend left=15] (w)
+
+    (tau_comp) edge (delta)
+    (delta) edge (alpha)
+    (z) edge (alpha)
+    (theta) edge (alpha);
+
+  % Plates (drawn behind nodes).
+  \begin{scope}[on background layer]
+    \node[rtplate, fit=(mu_c) (m_c), label=below right:{$c$}] (plate_c) {};
+    \node[rtplate, fit=(mu_s) (m_s) (tau_mu_s) (tau_w_s) (plate_c), label=below right:{$s$}] {};
+    \node[rtplate, fit=(alpha) (delta) (z), label=below right:{$k$}] {};
+    \node[rtplate, fit=(x) (y), label=below right:{$i$}] (plate_i) {};
+    \node[rtplate, fit=(b) (w) (plate_i), label=below right:{$g=(c,k)$}] {};
+  \end{scope}
+\end{tikzpicture}
+\caption{Plate diagram for the partial pooling RT ridge model. Shaded nodes are observed. Vector-valued nodes implicitly range over run covariates ($1\!:\!p$) or embedding dimensions ($1\!:\!D$). In production, the per-group slopes $w_{c,k}$ are integrated out (collapsed ridge) during inference and then recovered in closed form after fitting the hyperparameters.}
+\label{fig:rt_partial_pool_plate}
+\end{figure}
 
 \paragraph{Interpretation.}
 The intercept $b_{c,k}$ represents the baseline RT of compound $k$ in species $c$; we expect related species in the same
@@ -256,6 +345,7 @@ recover a Gaussian posterior for each group’s coefficients in closed form and 
 $\beta_{c,k,0}=b_{c,k}$ and $\beta_{c,k,j}=w_{c,k,j}$ for $j=1,\ldots,p$ (posterior mean and covariance). This exported
 artifact is what we use in production scoring: it avoids running Bayesian inference at runtime while still providing an
 explicit uncertainty estimate for RT filtering.
+
 \textbf{Approximation note:} we compute these group-wise posteriors conditional on fitted hyperparameters (typically at
 their posterior means under ADVI), rather than fully integrating over hyperparameter uncertainty.
 
@@ -277,7 +367,8 @@ where $\tilde{x}_{i,0}=1$ and $\tilde{x}_{i,j}=x_{i,j}$ for $j=1,\ldots,p$.
 In the hierarchical ridge model $\sigma^2_{g}$ is shared across groups, while the sklearn supercategory ridge baseline
 estimates a separate $\sigma^2_{g}$ per \texttt{(species\_cluster, comp\_id)} pair.
 With $\hat{\sigma}_i=\sqrt{\widehat{\mathrm{Var}}(y_i\mid x_{i,1:p})}$, a nominal 95\% RT window is
-$\hat{y}_i \pm 1.96\,\hat{\sigma}_i$ (width $2\cdot 1.96\cdot \hat{\sigma}_i$). This window can vary by group and by
+$\hat{y}_i \pm k_{0.95}\,\hat{\sigma}_i$ (width $2\cdot k_{0.95}\cdot \hat{\sigma}_i$), where
+$k_{0.95}=\Phi^{-1}(0.975)\approx 1.96$ under a Normal approximation. This window can vary by group and by
 covariates because it includes both residual noise and coefficient uncertainty.
 Downstream peak assignment uses this interval as a filter: a candidate peak is retained when its observed RT falls within
 the model’s window around $\hat{y}_i$.
@@ -299,7 +390,7 @@ Let $y_i$ be observed RT and $\hat{y}_i$ the point prediction (minutes).
 \begin{itemize}
   \item \textbf{RMSE}: $\sqrt{\frac{1}{n}\sum_i (\hat{y}_i - y_i)^2}$.
   \item \textbf{MAE}: $\frac{1}{n}\sum_i |\hat{y}_i - y_i|$.
-  \item \textbf{Coverage@95\%} (ridge models): define predicted variance as
+  \item \textbf{Cov95} (ridge models): define predicted variance as
   \[
   \begin{aligned}
     \widehat{\mathrm{Var}}(y_i\mid x_{i,1:p})
@@ -309,23 +400,22 @@ Let $y_i$ be observed RT and $\hat{y}_i$ the point prediction (minutes).
       \widehat{\mathrm{Cov}}\!\left(\beta_{g(i),a},\beta_{g(i),b}\right),
   \end{aligned}
   \]
-  with predicted standard deviation $\hat{\sigma}_i=\sqrt{\widehat{\mathrm{Var}}(y_i\mid x_{i,1:p})}$. We define the nominal
-  95\% interval as $\hat{y}_i \pm 1.96\,\hat{\sigma}_i$ and compute the fraction covered.
-  \item \textbf{Mean interval width} (ridge models): $\frac{1}{n}\sum_i 2\cdot 1.96\cdot \hat{\sigma}_i$.
-  \item \textbf{Coverage/width (lasso)}: computed from the baseline window $w_i$ via
-  $|\hat{y}_i - y_i| \le w_i$ (width $2w_i$). This is a useful diagnostic but is not a nominal probabilistic interval.
+  with predicted standard deviation $\hat{\sigma}_i=\sqrt{\widehat{\mathrm{Var}}(y_i\mid x_{i,1:p})}$ and
+  $k_{0.95}=\Phi^{-1}(0.975)\approx 1.96$.
+  We define the nominal 95\% interval as $\hat{y}_i \pm k_{0.95}\,\hat{\sigma}_i$ and count row $i$ as ``covered'' if
+  $|\hat{y}_i - y_i| \le k_{0.95}\,\hat{\sigma}_i$; Cov95 is the empirical fraction of covered rows.
+  The terms $\sigma^2_{g(i)}$ and $\widehat{\mathrm{Cov}}(\beta_{g(i)})$ come from the exported stage-1 coefficient summaries:
+  for the sklearn ridge baseline they are computed analytically from ridge normal equations with an inverse-gamma noise prior,
+  while for the partial pooling model they are computed in closed form conditional on fitted hierarchical hyperparameters
+  (an empirical-Bayes plug-in approximation).
+  \item \textbf{Width95} (ridge models): $\frac{1}{n}\sum_i 2\cdot k_{0.95}\cdot \hat{\sigma}_i$.
 \end{itemize}
 
 In the expressions above, $g(i)$ denotes the coefficient-summary group for row $i$, and we use the augmented covariates
 $\tilde{x}_{i,0}=1$ and $\tilde{x}_{i,j}=x_{i,j}$ for $j=1,\ldots,p$.
-
-We also stratify by \textbf{training support bin} of each $(\texttt{group\_id}, \texttt{comp\_id})$ group using bins:
-\[
-\{\le 1,\; 2,\; 3\text{--}5,\; 6\text{--}10,\; 11\text{--}20,\; 21\text{--}50,\; 51\text{--}100,\; >100\}.
-\]
-Note that \texttt{group\_id} depends on the model: for the hierarchical ridge model it is \texttt{species}, while for the
-supercategory ridge baseline it is \texttt{species\_cluster}. Therefore the support-bin plots should be interpreted as
-``tail vs head'' behavior within each model’s native grouping.
+For the production lasso baseline, the ``window'' is a fixed filtering half-width derived from held-out residuals and then
+scaled by a global multiplier (see lasso baseline section below). This window is not calibrated to a nominal 95\% target,
+so we do not report it as Cov95/Width95.
 
 \subsection{Alternative model: supercategory ridge (sklearn)}
 
@@ -339,23 +429,117 @@ coefficient covariance.
 \paragraph{Windowing.}
 For each \texttt{(species\_cluster, comp\_id)} group this baseline stores a fitted coefficient mean, an approximate
 coefficient covariance, and an estimated residual variance $\sigma^2_g$. For a new row, we compute $\hat{y}_i$ and
-$\hat{\sigma}_i$ and use the nominal 95\% window $\hat{y}_i \pm 1.96\,\hat{\sigma}_i$ (as defined above). This yields a
+$\hat{\sigma}_i$ and use the nominal 95\% window $\hat{y}_i \pm k_{0.95}\,\hat{\sigma}_i$ (as defined above). This yields a
 row-specific window rather than a fixed width per model.
+
+\begin{figure}[H]
+\centering
+\small
+\begin{tikzpicture}[scale=1.1, transform shape]
+  % Group-level parameters (independent per group).
+  \node[rtlatent] (b) {$b_g$};
+  \node[rtlatent, right=22mm of b] (w) {$w_g$};
+  \node[rtlatent, below right=12mm and 10mm of w] (sig2) {$\sigma_g^2$};
+  \node[rtconst, above right=10mm and 10mm of w] (lambda) {$\lambda_{\mathrm{ridge}}$};
+  \node[rtconst, above=10mm of sig2] (a0) {$a_0$};
+  \node[rtconst, below=10mm of sig2] (b0) {$b_0$};
+
+  % Observations.
+  \coordinate (bw_mid) at ($(b)!0.5!(w)$);
+  \node[rtobs, below=20mm of bw_mid] (y) {$y_i$};
+  \node[rtconst, left=20mm of y] (x) {$x_i$};
+
+  % Edges (interpret ridge as a Gaussian prior / penalty on slopes).
+  \path[rtarrow]
+    (a0) edge (sig2)
+    (b0) edge (sig2)
+    (lambda) edge (w)
+    (sig2) edge[bend left=12] (w)
+    (b) edge[out=255, in=140] (y)
+    (w) edge[out=270, in=40] (y)
+    (sig2) edge[out=200, in=-10] (y)
+    (x) edge (y);
+
+  % Plates.
+  \begin{scope}[on background layer]
+    \node[rtplate, fit=(x) (y), label=below right:{$i$}] (plate_i) {};
+    \node[rtplate, fit=(b) (w) (sig2) (plate_i), label={[yshift=2mm]above right:{$g=(s,k)$}}] {};
+  \end{scope}
+\end{tikzpicture}
+\caption{Plate diagram for the sklearn supercategory ridge baseline. Each group $g=(s,k)$ (species\_cluster, comp\_id) is fit independently with ridge shrinkage on slopes $w_g$ (intercept $b_g$ unpenalized). The exported artifact stores a coefficient mean, an approximate coefficient covariance, and a per-group residual variance estimate $\sigma_g^2$ (from an inverse-gamma noise model with hyperparameters $a_0,b_0$).}
+\label{fig:rt_sklearn_ridge_plate}
+\end{figure}
 
 \subsection{Baseline currently in production: supercategory lasso}
 
-The production baseline is a bank of lasso regressions fit per \texttt{species\_cluster}. Lasso is attractive for sparse
-solutions, but its $\ell_1$ prior is a poor match to correlated run covariates and it does not support partial pooling
-or chemistry-informed sharing across compounds. Its ``interval'' is a fixed window, not a probabilistic prediction interval.
+The production baseline is a bank of lasso regressions fit per \texttt{(species\_cluster, comp\_id)} pair. Lasso is
+attractive for sparse solutions, but its $\ell_1$ prior is a poor match to correlated run covariates and it does not
+support partial pooling or chemistry-informed sharing across compounds. Its ``interval'' is a fixed window, not a
+probabilistic prediction interval.
 
 \paragraph{Windowing in Hippopotamus.}
 In Hippopotamus, lasso coefficients are fit on a worksheet-level train split, and then a fixed window is attached using a
-hold-out split (commonly an 80/20 split by worksheet). The window is computed empirically from the held-out 20\% as a
-high percentile of absolute prediction errors (residuals) and stored in the model bundle as a per-model \texttt{window}.
-At scoring time, the interval is $\hat{y}_i \pm w$ (width $2w$), where $w$ is the same for every row scored by that
-\texttt{(species\_cluster, comp\_id)} model. This is a pragmatic way to set windows, but it is not derived from an explicit
-predictive distribution and it does not provide row-specific uncertainty; the window depends on the chosen split and the
-chosen percentile.
+hold-out split (commonly an 80/20 split by worksheet). For each \texttt{(species\_cluster, comp\_id)} model, the stored
+\texttt{window} is computed from the held-out residuals as a high percentile of the absolute error (approximately
+``$6\sigma$'' under a Normal error model):
+\[
+  w_{\mathrm{base}} = \mathrm{quantile}_{q}(|\hat{y}-y|),\qquad q\approx 0.999999998,
+\]
+and is saved alongside the regression coefficients in the model bundle. At scoring time (Sally/Hippopotamus), the
+effective filter half-width is scaled by a global multiplier and clamped to a minimum:
+\[
+  w_i = m\cdot \max(w_{\mathrm{base}}, w_{\min}),
+\]
+with default $m=4$ and $w_{\min}=0.001$. Candidate peaks are retained when $|\hat{y}_i - y_i| \le w_i$.
+This is a pragmatic way to set windows, but it is not derived from an explicit predictive distribution and it does not
+provide row-specific uncertainty; the window depends on the chosen split and this heuristic scale rule.
+
+\begin{figure}[H]
+\centering
+\small
+\begin{tikzpicture}[scale=1.1, transform shape]
+  % Lasso point-estimate coefficients (independent per group).
+  \node[rtlatent] (b) {$b_g$};
+  \node[rtlatent, right=22mm of b] (w) {$w_g$};
+  \node[rtconst, above right=10mm and 10mm of w] (alpha) {$\lambda_{\mathrm{lasso}}$};
+
+  % Prediction + window heuristic.
+  \coordinate (bw_mid) at ($(b)!0.5!(w)$);
+  \node[rtconst, below=16mm of bw_mid] (yhat) {$\hat{y}_i$};
+  \node[rtconst, left=22mm of yhat] (x) {$x_i$};
+  \node[rtobs, below=16mm of yhat] (y) {$y_i$};
+
+  \node[rtconst, right=28mm of yhat] (wbase) {$w_{\mathrm{base}}$};
+  \node[rtconst, right=26mm of wbase] (wi) {$w_i$};
+  \node[rtconst, below=16mm of wi] (keep) {$\mathbb{I}(|\hat{y}_i-y_i|\le w_i)$};
+
+  \node[rtconst, above=12mm of wi] (m) {$m$};
+  \node[rtconst, right=10mm of m] (wmin) {$w_{\min}$};
+
+  % Edges.
+  \path[rtarrow]
+    (alpha) edge (w)
+    (b) edge[out=270, in=140] (yhat)
+    (w) edge[out=270, in=40] (yhat)
+    (x) edge (yhat)
+    (yhat) edge[out=0, in=180] (wbase)
+    (y) edge[out=0, in=240] (wbase)
+    (wbase) edge (wi)
+    (m) edge (wi)
+    (wmin) edge (wi)
+    (wi) edge (keep)
+    (yhat) edge[out=320, in=160] (keep)
+    (y) edge[out=20, in=200] (keep);
+
+  % Plates.
+  \begin{scope}[on background layer]
+    \node[rtplate, fit=(x) (yhat) (y), label=below right:{$i$}] (plate_i) {};
+    \node[rtplate, fit=(b) (w) (plate_i) (wbase) (wi) (keep), label=below right:{$g=(s,k)$}] {};
+  \end{scope}
+\end{tikzpicture}
+\caption{Plate diagram for the production supercategory lasso baseline (Hippopotamus). For each group $g=(s,k)$ (species\_cluster, comp\_id), lasso fits point-estimate coefficients $(b_g,w_g)$ and computes a fixed window $w_{\mathrm{base}}$ from held-out absolute errors; scoring scales and clamps it to $w_i=m\max(w_{\mathrm{base}},w_{\min})$ and keeps a candidate when $|\hat{y}_i-y_i|\le w_i$.}
+\label{fig:rt_lasso_plate}
+\end{figure}
 
 \section{Results (seen compounds)}
 
@@ -366,25 +550,28 @@ score all rows; \textbf{Rows scored} reflects applicability.
 
 \begin{table}[H]
 \centering
-\caption{Global realtest metrics for cap100-trained models (linear features).}
+\caption{Global realtest metrics for cap100-trained models (linear features). Cov95/Width95 report empirical coverage and
+mean width of the nominal 95\% Normal interval $\hat{y}_i \pm k_{0.95}\,\hat{\sigma}_i$ and are only defined for ridge
+models with an explicit predictive variance. The lasso baseline uses a heuristic fixed filtering window; its Cov95/Width95
+entries are omitted (--) to avoid implying nominal calibration.}
 \label{tab:global_metrics}
 \begin{tabular}{llrrrrrr}
 \toprule
 Lib & Model & RMSE & MAE & Cov95 & Width95 & Rows scored & Train (min) \\
 \midrule
-208 & Ridge (supercategory, sklearn) & 0.009023 & 0.004673 & 0.943 & \textbf{0.023534} & \textbf{100.0\%} & \textbf{0.0} \\
-208 & Ridge (partial pooling, chem-linear) & \textbf{0.007874} & \textbf{0.003821} & \textbf{0.953} & 0.026681 & \textbf{100.0\%} & 107.8 \\
-208 & Lasso (supercategory) & 0.015081 & 0.007956 & 0.954 & 0.058908 & 94.7\% & -- \\
+208 & Ridge (supercategory) & 0.009050 & 0.004684 & 0.944 & \textbf{0.023573} & \textbf{100.0\%} & \textbf{0.0} \\
+208 & Ridge (partial pooling) & \textbf{0.007846} & \textbf{0.003817} & \textbf{0.958} & 0.028744 & \textbf{100.0\%} & 129.8 \\
+208 & Lasso (supercategory) & 0.015081 & 0.007956 & -- & -- & 94.7\% & -- \\
 \midrule
-209 & Ridge (supercategory, sklearn) & 0.008317 & 0.004677 & 0.920 & \textbf{0.021393} & \textbf{100.0\%} & \textbf{0.0} \\
-209 & Ridge (partial pooling, chem-linear) & \textbf{0.007707} & \textbf{0.004285} & \textbf{0.956} & 0.027518 & \textbf{100.0\%} & 182.9 \\
-209 & Lasso (supercategory) & 0.009439 & 0.004954 & 0.993 & 0.050886 & 97.8\% & -- \\
+209 & Ridge (supercategory) & 0.008295 & 0.004631 & 0.919 & \textbf{0.020994} & \textbf{100.0\%} & \textbf{0.0} \\
+209 & Ridge (partial pooling) & \textbf{0.007589} & \textbf{0.004203} & \textbf{0.957} & 0.027094 & \textbf{100.0\%} & 230.6 \\
+209 & Lasso (supercategory) & 0.009439 & 0.004954 & -- & -- & 97.8\% & -- \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \paragraph{Interpretation.}
-Relative to Ridge (supercategory, sklearn), Ridge (partial pooling, chem-linear) improves RMSE while moving coverage
+Relative to Ridge (supercategory), Ridge (partial pooling) improves RMSE while moving coverage
 closer to the nominal 0.95 target. This is desirable for peak assignment because under-coverage translates directly into
 missed true peaks when the window is used as a hard filter.
 The lasso baseline is included for context: it does not score all rows and its uncertainty is a fixed window rather than
@@ -394,7 +581,8 @@ a probabilistic interval.
 \centering
 \includegraphics[width=0.95\linewidth]{lib208_global_comparison_anchor_none_full.png}
 \caption{Global comparison across report baselines for lib208 (cap100 training, realtest evaluation). Panels show RMSE,
-coverage@95\%, mean interval width, and training time.}
+Cov95 (ridge models only; lasso omitted), and mean RT window width (Width95 for ridge models; production filtering window
+for lasso). Tighter windows are only meaningful when coverage is comparable.}
 \label{fig:global_comparison_lib208}
 \end{figure}
 
@@ -402,7 +590,8 @@ coverage@95\%, mean interval width, and training time.}
 \centering
 \includegraphics[width=0.95\linewidth]{lib209_global_comparison_anchor_none_full.png}
 \caption{Global comparison across report baselines for lib209 (cap100 training, realtest evaluation). Panels show RMSE,
-coverage@95\%, mean interval width, and training time.}
+Cov95 (ridge models only; lasso omitted), and mean RT window width (Width95 for ridge models; production filtering window
+for lasso). Tighter windows are only meaningful when coverage is comparable.}
 \label{fig:global_comparison_lib209}
 \end{figure}
 
@@ -413,27 +602,6 @@ they differ in how information is shared across sparse groups and in how predict
 sklearn baseline produces narrower windows but under-covers the nominal 95\% target (coverage $\sim$0.92--0.94). The
 hierarchical model yields coverage closer to nominal at moderately larger width.
 
-\subsection{Performance by training support bin}
-
-Figures~\ref{fig:support_bin_lib208} and \ref{fig:support_bin_lib209} break metrics down by training support bin (long tail
-to head).
-
-\begin{figure}[H]
-\centering
-\includegraphics[width=0.95\linewidth]{lib208_by_support_bin_anchor_none_full.png}
-\caption{Metrics by training support bin for lib208 report baselines. Coverage@95\% is empirical coverage of the nominal 95\%
-prediction interval (ridge models) or window interval (lasso baseline).}
-\label{fig:support_bin_lib208}
-\end{figure}
-
-\begin{figure}[H]
-\centering
-\includegraphics[width=0.95\linewidth]{lib209_by_support_bin_anchor_none_full.png}
-\caption{Metrics by training support bin for lib209 report baselines. Coverage@95\% is empirical coverage of the nominal 95\%
-prediction interval (ridge models) or window interval (lasso baseline).}
-\label{fig:support_bin_lib209}
-\end{figure}
-
 \subsection{Performance by species\_cluster}
 
 Figures~\ref{fig:by_cluster_lib208} and \ref{fig:by_cluster_lib209} aggregate metrics by \texttt{species\_cluster}.
@@ -441,18 +609,155 @@ Figures~\ref{fig:by_cluster_lib208} and \ref{fig:by_cluster_lib209} aggregate me
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.95\linewidth]{lib208_by_species_cluster_anchor_none_full.png}
-\caption{Metrics by \texttt{species\_cluster} (supercategory) for lib208 report baselines.}
+\caption{Metrics by \texttt{species\_cluster} (supercategory) for lib208 report baselines. The Cov95 panel excludes lasso
+because its fixed filtering window is not a nominal probabilistic interval; mean RT window width includes the lasso
+filtering window for context.}
 \label{fig:by_cluster_lib208}
 \end{figure}
 
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.95\linewidth]{lib209_by_species_cluster_anchor_none_full.png}
-\caption{Metrics by \texttt{species\_cluster} (supercategory) for lib209 report baselines.}
+\caption{Metrics by \texttt{species\_cluster} (supercategory) for lib209 report baselines. The Cov95 panel excludes lasso
+because its fixed filtering window is not a nominal probabilistic interval; mean RT window width includes the lasso
+filtering window for context.}
 \label{fig:by_cluster_lib209}
 \end{figure}
 
+\section{Preliminary end-to-end Sally evaluation (real sample sets)}
+
+Offline split evaluation is necessary but not sufficient for deployment: in production the RT model is used inside
+Sally's peak assignment pipeline as a hard filter and interacts with other stages (candidate generation, peak selection,
+and post-processing). To assess the impact in context, we ran Sally end-to-end on real sample sets using
+\texttt{sally-dev evaluate} and compared:
+\begin{itemize}
+  \item the current production baseline RT model (\textbf{supercategory lasso}, model type \texttt{ESLASSO}), and
+  \item the new CompAssign partial pooling ridge model exported as stage-1 coefficient summaries
+  (model type \nolinkurl{COMPASSIGN_PP_RIDGE}).
+\end{itemize}
+
+All evaluations use the \texttt{mdsutils} metric implementation (precision/recall/Threat Score) to match current Sally
+reporting, and were run with the standard \texttt{baseline} peak-assignment method.
+To make iteration practical, we relied on Sally's local on-disk cache to avoid expensive peak fetches on repeated runs.
+
+\paragraph{What changed in Sally (summary).}\mbox{}\\
+To support \nolinkurl{COMPASSIGN_PP_RIDGE} end-to-end inside \texttt{sally-dev}, we made the following focused changes:
+\begin{itemize}
+  \item \textbf{New modelType.} Added \nolinkurl{modelType=COMPASSIGN_PP_RIDGE} which loads CompAssign stage-1 coefficient
+  summaries and backoff summaries (both shipped as \texttt{.npz} artifacts), and computes per-task RT windows from
+  predictive variance.
+  \item \textbf{RT window plumbing.} Generalized \texttt{RegressionPredictor} so RT windows can be either per-compound
+  (1D) or per-(task,compound) (2D), since \nolinkurl{COMPASSIGN_PP_RIDGE} produces row-specific uncertainty.
+  \item \textbf{sally-dev flag pass-through.} Added CompAssign RT inputs (species, species\_cluster, and covariates CSV) and
+  \texttt{--force-curate} to run the full curation pipeline for evaluation even when a sample set would normally be
+  skipped.
+  \item \textbf{Evaluation reliability and covariates I/O.} Updated \texttt{sally-dev evaluate} to fail fast when the
+  underlying pipeline run fails (instead of continuing with stale cached pickles), and updated the pipeline wrapper and
+  \nolinkurl{COMPASSIGN_PP_RIDGE} loader so production-style RT covariates can be mounted into the Docker container and read
+  efficiently by streaming only the required task IDs (important for multi-GB lib209 covariates CSVs).
+\end{itemize}
+
+\paragraph{Selected SSIDs.}
+We evaluated five held-out cell-type SSIDs from supercategories 6 and 8. For lib208:
+\textbf{SSID 12307} (supercat 6), \textbf{SSID 12609} (supercat 8), and \textbf{SSID 12725} (supercat 6). For lib209:
+\textbf{SSID 23059} (supercat 6) and \textbf{SSID 20159} (supercat 8).
+For convenience and full reproducibility, \nolinkurl{src/compassign/rt/sally_test.sh} re-runs the exact SSIDs via
+\texttt{sally-dev evaluate} (script: \path{external_repos/sally/scripts/sally-dev}).
+We compare baseline \texttt{ESLASSO} vs candidate \nolinkurl{COMPASSIGN_PP_RIDGE} and write outputs into fixed
+subdirectories under \path{external_repos/sally/out/}.
+The script includes the exact parameters used (including covariates CSV paths) and prints a compact summary table.
+These results require the Sally checkout under \nolinkurl{external_repos/sally} to be on branch
+\nolinkurl{jw/new-experimental-model}.
+
+\paragraph{Results.}
+Tables~\ref{tab:sally_prelim_cells_lib208} and \ref{tab:sally_prelim_cells_lib209} report the end-to-end peak-assignment
+metrics from Sally's \texttt{mdsutils} summary pickles. Higher is better for all three metrics. For each SSID, the
+baseline and \nolinkurl{COMPASSIGN_PP_RIDGE} were run with the same peak-assignment method and evaluation mode.
+
+\begin{table}[H]
+\centering
+\caption{Preliminary end-to-end Sally evaluation on selected cell-type SSIDs (lib208; supercategories 6 and 8). Metrics
+are precision, recall, and Threat Score (TS) from \texttt{mdsutils}. Bold indicates the best value within each SSID.}
+\label{tab:sally_prelim_cells_lib208}
+\begin{tabular}{lllrrr}
+\toprule
+Supercat & SSID & Model & Precision & Recall & TS \\
+\midrule
+6 & 12307 & ESLASSO (supercategory lasso) & 0.8436 & 0.7848 & 0.6851 \\
+6 & 12307 & COMPASSIGN\_PP\_RIDGE (partial pooling ridge) & \textbf{0.9537} & \textbf{0.8109} & \textbf{0.7801} \\
+\midrule
+8 & 12609 & ESLASSO (supercategory lasso) & 0.8553 & 0.6513 & 0.5867 \\
+8 & 12609 & COMPASSIGN\_PP\_RIDGE (partial pooling ridge) & \textbf{0.8591} & \textbf{0.8036} & \textbf{0.7101} \\
+\midrule
+6 & 12725 & ESLASSO (supercategory lasso) & 0.6808 & 0.8610 & 0.6134 \\
+6 & 12725 & COMPASSIGN\_PP\_RIDGE (partial pooling ridge) & \textbf{0.8587} & \textbf{0.8786} & \textbf{0.7676} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Preliminary end-to-end Sally evaluation on selected cell-type SSIDs (lib209; supercategories 6 and 8). Metrics
+are precision, recall, and Threat Score (TS) from \texttt{mdsutils}. Bold indicates the best value within each SSID.}
+\label{tab:sally_prelim_cells_lib209}
+\begin{tabular}{lllrrr}
+\toprule
+Supercat & SSID & Model & Precision & Recall & TS \\
+\midrule
+8 & 20159 & ESLASSO (supercategory lasso) & 0.8865 & 0.8697 & 0.7825 \\
+8 & 20159 & COMPASSIGN\_PP\_RIDGE (partial pooling ridge) & \textbf{0.8967} & \textbf{0.8841} & \textbf{0.8024} \\
+\midrule
+6 & 23059 & ESLASSO (supercategory lasso) & 0.8357 & 0.5940 & 0.5319 \\
+6 & 23059 & COMPASSIGN\_PP\_RIDGE (partial pooling ridge) & \textbf{0.8383} & \textbf{0.6667} & \textbf{0.5907} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Provenance.}\mbox{}\\
+Tables~\ref{tab:sally_prelim_cells_lib208} and \ref{tab:sally_prelim_cells_lib209} were computed from the \texttt{mdsutils}
+summary pickles produced by \texttt{sally-dev evaluate} (script: \path{external_repos/sally/scripts/sally-dev}).
+The exact output directories and summary pickle paths are recorded under \path{external_repos/sally/out/} and are
+referenced/printed by \nolinkurl{src/compassign/rt/sally_test.sh}.
+
+\paragraph{Interpretation (current status).}\mbox{}\\
+Across these selected SSIDs, \nolinkurl{COMPASSIGN_PP_RIDGE} improves Threat Score (TS) relative to the current lasso
+baseline on all three lib208 checks and both lib209 checks. These results are preliminary but are directionally
+consistent with the offline split evaluations for lib208: partial pooling with a ridge prior can stabilize RT filtering
+in hard cell-type supercategories.
+
+\paragraph{Findings so far.}
+On these selected cell-type SSIDs, \nolinkurl{COMPASSIGN_PP_RIDGE} improves TS by approximately +0.10 (SSID 12307),
++0.12 (SSID 12609), and +0.15 (SSID 12725) versus \texttt{ESLASSO} for lib208.
+For lib209, \nolinkurl{COMPASSIGN_PP_RIDGE} improves TS by approximately +0.02 (SSID 20159) and +0.06 (SSID 23059).
+Overall, the integration appears to be working end-to-end on both libraries and requires broader sampling to assess the
+typical magnitude of gains.
+
+\paragraph{Missing SMILES coverage.}
+For these cap100-trained lib208/lib209 models, the coefficient-summary artifacts include compounds with missing chemistry
+metadata (missing \texttt{chemical\_id} or missing ChemBERTa embeddings). For lib208, the trainer uses mean-embedding
+fallback for 310 compounds with missing \texttt{chemical\_id} and 138 compounds with missing embeddings; for lib209, this is
+990 and 540 compounds, respectively. This prevents coverage holes in the Sally integration (avoids ``No RT model'') at the
+cost of disabling the chemistry-informed prior mean for those compounds (chemistry term uses $z_c=0$).
+
+\paragraph{Recommended next steps.}
+Before making a deployment decision, we recommend:
+\begin{itemize}
+  \item \textbf{Scale out evaluation.} Run the same baseline-vs-candidate comparison on a larger set of SSIDs (including
+  multi-lib sample sets), reporting both per-SSID and aggregated deltas.
+  \item \textbf{Remove manual inputs.} Implement automatic resolution of \texttt{species} and \texttt{species\_cluster}
+  for each SSID (per lib) so \texttt{sally-dev evaluate} can be run reproducibly without hand-provided IDs.
+  \item \textbf{Confirm end-to-end calibration.} Verify predictive window calibration (and its interaction with artifact
+  and sparsity post-processing) across a broader sample of SSIDs.
+\end{itemize}
+
 \section{Discussion}
+
+The offline split results establish that \texttt{COMPASSIGN\_PP\_RIDGE} improves RT prediction and produces calibrated
+windows, but deployment impact depends on how RT filtering interacts with Sally's full peak-assignment pipeline. On five
+real held-out SSIDs (Tables~\ref{tab:sally_prelim_cells_lib208} and \ref{tab:sally_prelim_cells_lib209}),
+\nolinkurl{COMPASSIGN_PP_RIDGE} improves Threat Score (TS) versus the current \texttt{ESLASSO} baseline on all checks (lib208:
+approximately +0.10, +0.12, +0.15; lib209: approximately +0.02, +0.06). This indicates the RT gains translate into
+end-to-end improvements once post-processing (notably artifact handling) is aligned with the new RT filtering behavior.
 
 Across both libraries, the hierarchical ridge model improves point accuracy modestly but, more importantly for peak
 assignment, produces predictive windows with coverage close to the nominal 95\% target. The fast sklearn ridge baseline
@@ -498,13 +803,13 @@ to the supercategory ridge baseline, and include the legacy lasso bundle for con
 \toprule
 Holdout & Model & RMSE & MAE & Cov95 & Rows scored (\%) \\
 \midrule
-\texttt{species} & Ridge (partial pooling, chem-linear) & 0.014968 & 0.009012 & 1.000 & \textbf{100.0} \\
-\texttt{species} & Ridge (supercategory, sklearn) & 0.011090 & 0.005202 & 0.877 & \textbf{100.0} \\
-\texttt{species} & Lasso (supercategory, external) & \textbf{0.007913} & \textbf{0.004174} & \textbf{0.995} & 94.8 \\
+\texttt{species} & Ridge (partial pooling) & 0.014968 & 0.009012 & 1.000 & \textbf{100.0} \\
+\texttt{species} & Ridge (supercategory) & 0.011090 & 0.005202 & 0.877 & \textbf{100.0} \\
+\texttt{species} & Lasso (supercategory, external) & \textbf{0.007913} & \textbf{0.004174} & -- & 94.8 \\
 \midrule
-\texttt{species\_comp} & Ridge (partial pooling, chem-linear) & 0.013474 & 0.009569 & 1.000 & \textbf{100.0} \\
-\texttt{species\_comp} & Ridge (supercategory, sklearn) & 0.013272 & 0.006532 & 0.812 & \textbf{100.0} \\
-\texttt{species\_comp} & Lasso (supercategory, external) & \textbf{0.007671} & \textbf{0.004331} & \textbf{0.999} & 94.9 \\
+\texttt{species\_comp} & Ridge (partial pooling) & 0.013474 & 0.009569 & 1.000 & \textbf{100.0} \\
+\texttt{species\_comp} & Ridge (supercategory) & 0.013272 & 0.006532 & 0.812 & \textbf{100.0} \\
+\texttt{species\_comp} & Lasso (supercategory, external) & \textbf{0.007671} & \textbf{0.004331} & -- & 94.9 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -517,13 +822,13 @@ Holdout & Model & RMSE & MAE & Cov95 & Rows scored (\%) \\
 \toprule
 Holdout & Model & RMSE & MAE & Cov95 & Rows scored (\%) \\
 \midrule
-\texttt{species} & Ridge (partial pooling, chem-linear) & 0.008381 & 0.005281 & 1.000 & \textbf{100.0} \\
-\texttt{species} & Ridge (supercategory, sklearn) & 0.008268 & 0.004870 & 0.902 & \textbf{100.0} \\
-\texttt{species} & Lasso (supercategory, external) & \textbf{0.006779} & \textbf{0.004267} & \textbf{0.996} & 92.4 \\
+\texttt{species} & Ridge (partial pooling) & 0.008381 & 0.005281 & 1.000 & \textbf{100.0} \\
+\texttt{species} & Ridge (supercategory) & 0.008268 & 0.004870 & 0.902 & \textbf{100.0} \\
+\texttt{species} & Lasso (supercategory, external) & \textbf{0.006779} & \textbf{0.004267} & -- & 92.4 \\
 \midrule
-\texttt{species\_comp} & Ridge (partial pooling, chem-linear) & 0.011684 & 0.006456 & 1.000 & \textbf{100.0} \\
-\texttt{species\_comp} & Ridge (supercategory, sklearn) & 0.013582 & 0.006320 & 0.883 & \textbf{100.0} \\
-\texttt{species\_comp} & Lasso (supercategory, external) & \textbf{0.009482} & \textbf{0.005677} & \textbf{0.997} & 95.0 \\
+\texttt{species\_comp} & Ridge (partial pooling) & 0.011684 & 0.006456 & 1.000 & \textbf{100.0} \\
+\texttt{species\_comp} & Ridge (supercategory) & 0.013582 & 0.006320 & 0.883 & \textbf{100.0} \\
+\texttt{species\_comp} & Lasso (supercategory, external) & \textbf{0.009482} & \textbf{0.005677} & -- & 95.0 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -548,7 +853,7 @@ non-linear single-model embedding baseline (MLP) that uses ChemBERTa PCA-20 feat
 \toprule
 Model & RMSE & MAE & Cov95 \\
 \midrule
-Ridge (partial pooling, chem-linear; PyMC) & 1.049358 & 0.699639 & \textbf{1.000} \\
+Ridge (partial pooling) & 1.049358 & 0.699639 & \textbf{1.000} \\
 MLP (ChemBERTa PCA-20 + cluster interactions) & \textbf{0.468125} & \textbf{0.345321} & -- \\
 \bottomrule
 \end{tabular}
@@ -562,7 +867,7 @@ MLP (ChemBERTa PCA-20 + cluster interactions) & \textbf{0.468125} & \textbf{0.34
 \toprule
 Model & RMSE & MAE & Cov95 \\
 \midrule
-Ridge (partial pooling, chem-linear; PyMC) & 1.523705 & 1.062139 & \textbf{0.991} \\
+Ridge (partial pooling) & 1.523705 & 1.062139 & \textbf{0.991} \\
 MLP (ChemBERTa PCA-20 + cluster interactions) & \textbf{1.061293} & \textbf{0.799969} & -- \\
 \bottomrule
 \end{tabular}

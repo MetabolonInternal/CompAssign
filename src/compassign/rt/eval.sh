@@ -50,7 +50,8 @@ eval_model() {
   local lib_id="$1"
   local coeff_npz="$2"
   local test_csv="$3"
-  local log_path="$4"
+  local common_support_map_csv="$4"
+  local log_path="$5"
 
   local out_json=""
   if [[ "${coeff_npz}" == */models/stage1_coeff_summaries_posterior.npz ]]; then
@@ -59,8 +60,21 @@ eval_model() {
     out_json="$(dirname "${coeff_npz}")/results/rt_eval_coeff_summaries_by_support_realtest.json"
   fi
   if [[ -f "${out_json}" ]]; then
-    echo "[eval] Skip (exists): ${out_json}"
-    return 0
+    if poetry run python - "${out_json}" "${common_support_map_csv}" <<'PY' >/dev/null 2>&1
+import json
+import sys
+from pathlib import Path
+
+out_json = Path(sys.argv[1])
+expected = str(Path(sys.argv[2]).resolve())
+d = json.loads(out_json.read_text())
+ok = d.get("common_support_map_csv") == expected
+raise SystemExit(0 if ok else 1)
+PY
+    then
+      echo "[eval] Skip (exists, common support ok): ${out_json}"
+      return 0
+    fi
   fi
 
   run_cmd "${log_path}" \
@@ -69,6 +83,7 @@ eval_model() {
       --test-csv "${test_csv}" \
       --chunk-size "${CHUNK_SIZE}" \
       --log-every-chunks "${LOG_EVERY_CHUNKS}" \
+      --common-support-map-csv "${common_support_map_csv}" \
       --label realtest
 }
 
@@ -81,8 +96,21 @@ eval_lasso_supercat() {
 
   local out_json="${output_dir}/results/rt_eval_lasso_realtest.json"
   if [[ -f "${out_json}" ]]; then
-    echo "[eval] Skip (exists): ${out_json}"
-    return 0
+    if poetry run python - "${out_json}" "${support_map_csv}" <<'PY' >/dev/null 2>&1
+import json
+import sys
+from pathlib import Path
+
+out_json = Path(sys.argv[1])
+expected = str(Path(sys.argv[2]).resolve())
+d = json.loads(out_json.read_text())
+ok = d.get("support_map_csv") == expected
+raise SystemExit(0 if ok else 1)
+PY
+    then
+      echo "[eval] Skip (exists, support map ok): ${out_json}"
+      return 0
+    fi
   fi
 
   local -a cmd=(
@@ -92,6 +120,8 @@ eval_lasso_supercat() {
       --test-csv "${test_csv}"
       --chunk-size "${CHUNK_SIZE}"
       --label realtest
+      --window-multiplier 4
+      --min-window 0.001
   )
   if [[ -n "${support_map_csv}" && -f "${support_map_csv}" ]]; then
     cmd+=(--support-map-csv "${support_map_csv}")
@@ -108,9 +138,23 @@ for lib in "${LIB_IDS[@]}"; do
 
   echo "[eval] lib${lib} ${CAP}"
 
+  TRAIN_CSV="repo_export/lib${lib}/${CAP}/merged_training_all_lib${lib}_${CAP}_chemclass_rt_prod.csv"
+  if [[ ! -f "${TRAIN_CSV}" ]]; then
+    echo "ERROR: Missing train CSV for common support bins: ${TRAIN_CSV}" >&2
+    exit 2
+  fi
+  COMMON_SUPPORT_MAP="${RUN_DIR}/lib${lib}/${CAP}/support_map_species_cluster_comp_${CAP}.csv"
+  if [[ ! -f "${COMMON_SUPPORT_MAP}" ]]; then
+    echo "[eval] Building common support map: ${COMMON_SUPPORT_MAP}"
+    run_cmd "${RUN_DIR}/logs/lib${lib}_${CAP}_common_support_map.build.log" \
+      poetry run python -u -m compassign.rt.build_support_map_species_cluster_comp \
+        --train-csv "${TRAIN_CSV}" \
+        --out-csv "${COMMON_SUPPORT_MAP}"
+  fi
+
   PARTIAL_COEFF="${RUN_DIR}/lib${lib}/${CAP}/features_none/pymc_pooled_species_comp_hier_supercat_cluster_supercat/models/stage1_coeff_summaries_posterior.npz"
   if [[ -f "${PARTIAL_COEFF}" ]]; then
-    eval_model "${lib}" "${PARTIAL_COEFF}" "${TEST_CSV}" \
+    eval_model "${lib}" "${PARTIAL_COEFF}" "${TEST_CSV}" "${COMMON_SUPPORT_MAP}" \
       "${RUN_DIR}/logs/lib${lib}_${CAP}_none_pymc_pooled_species_comp_hier_supercat_cluster_supercat.eval.log"
   else
     echo "[eval] Skip missing partial coeff: ${PARTIAL_COEFF}"
@@ -118,18 +162,17 @@ for lib in "${LIB_IDS[@]}"; do
 
   SK_COEFF="${RUN_DIR}/lib${lib}/${CAP}/sklearn_ridge_species_cluster/stage1_coeff_summaries.npz"
   if [[ -f "${SK_COEFF}" ]]; then
-    eval_model "${lib}" "${SK_COEFF}" "${TEST_CSV}" \
+    eval_model "${lib}" "${SK_COEFF}" "${TEST_CSV}" "${COMMON_SUPPORT_MAP}" \
       "${RUN_DIR}/logs/lib${lib}_${CAP}_sklearn_ridge_species_cluster.eval.log"
   fi
 
   # Lasso supercategory baseline (external eslasso models).
   LASSO_OUT="${RUN_DIR}/lib${lib}/${CAP}/lasso_eslasso_species_cluster"
-  SUPPORT_MAP="${RUN_DIR}/lib${lib}/${CAP}/sklearn_ridge_species_cluster/results/rt_eval_coeff_summaries_by_group_realtest.csv"
-  eval_lasso_supercat "${lib}" "${LASSO_OUT}" "${TEST_CSV}" "${SUPPORT_MAP}" \
+  eval_lasso_supercat "${lib}" "${LASSO_OUT}" "${TEST_CSV}" "${COMMON_SUPPORT_MAP}" \
 	"${RUN_DIR}/logs/lib${lib}_${CAP}_lasso_eslasso_species_cluster.eval.log"
 done
 
-echo "[eval] Plotting (global + by support + by species_cluster)"
+echo "[eval] Plotting (global + by species_cluster)"
 LIBS_CSV="$(IFS=,; echo "${LIB_IDS[*]}")"
 poetry run python -u -m compassign.rt.plot_rt_multilevel_results \
   --run-dir "${RUN_DIR}" \
@@ -147,7 +190,7 @@ if [[ ! -d "${PLOTS_DIR}" ]]; then
   exit 2
 fi
 for lib in "${LIB_IDS[@]}"; do
-  for stem in global_comparison by_support_bin by_species_cluster; do
+  for stem in global_comparison by_species_cluster; do
     src="${PLOTS_DIR}/lib${lib}_${stem}_anchor_none_full.png"
     if [[ ! -f "${src}" ]]; then
       echo "ERROR: Missing plot: ${src}" >&2
