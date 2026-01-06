@@ -71,3 +71,4 @@ external_repos/
 # Keep documentation artifacts (some environments globally ignore directories named "results")
 !docs/models/results/
 !docs/models/results/**/*
+output.old

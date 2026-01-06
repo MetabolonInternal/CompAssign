@@ -9,6 +9,16 @@
 \usepackage{subcaption}
 \usepackage{longtable}
 \usepackage{fontspec}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, backgrounds, calc, fit, positioning}
+
+\tikzset{
+  rtarrow/.style={->, >=Stealth, thick},
+  rtlatent/.style={circle, draw, thick, minimum size=18pt, inner sep=1pt},
+  rtobs/.style={rtlatent, fill=gray!20},
+  rtconst/.style={rectangle, draw, thick, rounded corners, inner sep=2pt, minimum height=16pt},
+  rtplate/.style={draw, rounded corners, dashed, inner sep=6pt},
+}
 
 \setmainfont{Times New Roman}
 \setmonofont{Menlo}
@@ -119,6 +129,85 @@ and we fit one linear regression per group:
 
 The model becomes useful in the long tail because we do \emph{not} fit each $b_{c,k}$ and $w_{c,k,1:p}$ independently:
 we place hierarchical (partially pooled) priors on intercepts and slope means, and we tie compound effects to chemistry.
+
+\begin{figure}[H]
+\centering
+\small
+\begin{tikzpicture}
+  % Species / supercategory hierarchy (intercepts + slope means).
+  \node[rtlatent] (mu_s) {$\mu_s$};
+  \node[rtlatent, below=12mm of mu_s] (mu_c) {$\mu_c$};
+  \node[rtlatent, above=12mm of mu_s] (tau_mu_sc) {$\tau_{\mu,\mathrm{supercat}}$};
+  \node[rtlatent, left=18mm of mu_c] (tau_mu_s) {$\tau_{\mu,s}$};
+
+  \node[rtlatent, below=16mm of mu_c] (m_s) {$m_s$};
+  \node[rtlatent, below=16mm of m_s] (m_c) {$m_c$};
+  \node[rtlatent, left=18mm of m_s] (tau_w_sc) {$\tau_{w,\mathrm{supercat}}$};
+  \node[rtlatent, left=18mm of m_c] (tau_w_s) {$\tau_{w,s}$};
+  \node[rtlatent, right=22mm of m_s] (w0) {$w_0$};
+
+  % Group-level coefficients (per (species, compound)).
+  \node[rtlatent, right=46mm of mu_c] (b) {$b_{c,k}$};
+  \node[rtlatent, right=22mm of b] (w) {$w_{c,k}$};
+  \node[rtlatent, above=12mm of b] (t0) {$t_0$};
+  \node[rtlatent, above left=10mm and 18mm of b] (tau_b) {$\tau_b$};
+  \node[rtconst, right=22mm of w] (lambda) {$\lambda_{\mathrm{slopes}}$};
+
+  % Chemistry-informed compound effects.
+  \node[rtlatent, above right=10mm and 18mm of b] (alpha) {$\alpha_k$};
+  \node[rtlatent, above=12mm of alpha] (delta) {$\delta_k$};
+  \node[rtlatent, left=18mm of delta] (tau_comp) {$\tau_{\mathrm{comp}}$};
+  \node[rtconst, right=18mm of alpha] (z) {$z_{h(k)}$};
+  \node[rtlatent, above=12mm of z] (theta) {$\theta_\alpha$};
+
+  % Observation model.
+  \coordinate (bw_mid) at ($(b)!0.5!(w)$);
+  \node[rtobs, below=22mm of bw_mid] (y) {$y_i$};
+  \node[rtconst, left=18mm of y] (x) {$x_i$};
+  \node[rtlatent, right=18mm of y] (sigma_y) {$\sigma_y$};
+
+  % Edges.
+  \path[rtarrow]
+    (tau_mu_sc) edge (mu_s)
+    (mu_s) edge (mu_c)
+    (tau_mu_s) edge (mu_c)
+
+    (w0) edge (m_s)
+    (tau_w_sc) edge (m_s)
+    (m_s) edge (m_c)
+    (tau_w_s) edge (m_c)
+
+    (t0) edge (b)
+    (tau_b) edge (b)
+    (mu_c) edge (b)
+    (alpha) edge (b)
+
+    (m_c) edge[out=0, in=235, looseness=1.25] (w)
+    (lambda) edge (w)
+
+    (x) edge (y)
+    (b) edge (y)
+    (w) edge (y)
+    (sigma_y) edge (y)
+    (sigma_y) edge[bend left=15] (w)
+
+    (tau_comp) edge (delta)
+    (delta) edge (alpha)
+    (z) edge (alpha)
+    (theta) edge (alpha);
+
+  % Plates (drawn behind nodes).
+  \begin{scope}[on background layer]
+    \node[rtplate, fit=(mu_c) (m_c), label=below right:{$c$}] (plate_c) {};
+    \node[rtplate, fit=(mu_s) (m_s) (tau_mu_s) (tau_w_s) (plate_c), label=below right:{$s$}] {};
+    \node[rtplate, fit=(alpha) (delta) (z), label=below right:{$k$}] {};
+    \node[rtplate, fit=(x) (y), label=below right:{$i$}] (plate_i) {};
+    \node[rtplate, fit=(b) (w) (plate_i), label=below right:{$g=(c,k)$}] {};
+  \end{scope}
+\end{tikzpicture}
+\caption{Plate diagram for the partial pooling RT ridge model. Shaded nodes are observed. Vector-valued nodes implicitly range over run covariates ($1\!:\!p$) or embedding dimensions ($1\!:\!D$). In production, the per-group slopes $w_{c,k}$ are integrated out (collapsed ridge) during inference and then recovered in closed form after fitting the hyperparameters.}
+\label{fig:rt_partial_pool_plate}
+\end{figure}
 
 \paragraph{Interpretation.}
 The intercept $b_{c,k}$ represents the baseline RT of compound $k$ in species $c$; we expect related species in the same
@@ -343,18 +432,58 @@ coefficient covariance, and an estimated residual variance $\sigma^2_g$. For a n
 $\hat{\sigma}_i$ and use the nominal 95\% window $\hat{y}_i \pm k_{0.95}\,\hat{\sigma}_i$ (as defined above). This yields a
 row-specific window rather than a fixed width per model.
 
+\begin{figure}[H]
+\centering
+\small
+\begin{tikzpicture}[scale=1.1, transform shape]
+  % Group-level parameters (independent per group).
+  \node[rtlatent] (b) {$b_g$};
+  \node[rtlatent, right=22mm of b] (w) {$w_g$};
+  \node[rtlatent, below right=12mm and 10mm of w] (sig2) {$\sigma_g^2$};
+  \node[rtconst, above right=10mm and 10mm of w] (lambda) {$\lambda_{\mathrm{ridge}}$};
+  \node[rtconst, above=10mm of sig2] (a0) {$a_0$};
+  \node[rtconst, below=10mm of sig2] (b0) {$b_0$};
+
+  % Observations.
+  \coordinate (bw_mid) at ($(b)!0.5!(w)$);
+  \node[rtobs, below=20mm of bw_mid] (y) {$y_i$};
+  \node[rtconst, left=20mm of y] (x) {$x_i$};
+
+  % Edges (interpret ridge as a Gaussian prior / penalty on slopes).
+  \path[rtarrow]
+    (a0) edge (sig2)
+    (b0) edge (sig2)
+    (lambda) edge (w)
+    (sig2) edge[bend left=12] (w)
+    (b) edge[out=255, in=140] (y)
+    (w) edge[out=270, in=40] (y)
+    (sig2) edge[out=200, in=-10] (y)
+    (x) edge (y);
+
+  % Plates.
+  \begin{scope}[on background layer]
+    \node[rtplate, fit=(x) (y), label=below right:{$i$}] (plate_i) {};
+    \node[rtplate, fit=(b) (w) (sig2) (plate_i), label={[yshift=2mm]above right:{$g=(s,k)$}}] {};
+  \end{scope}
+\end{tikzpicture}
+\caption{Plate diagram for the sklearn supercategory ridge baseline. Each group $g=(s,k)$ (species\_cluster, comp\_id) is fit independently with ridge shrinkage on slopes $w_g$ (intercept $b_g$ unpenalized). The exported artifact stores a coefficient mean, an approximate coefficient covariance, and a per-group residual variance estimate $\sigma_g^2$ (from an inverse-gamma noise model with hyperparameters $a_0,b_0$).}
+\label{fig:rt_sklearn_ridge_plate}
+\end{figure}
+
 \subsection{Baseline currently in production: supercategory lasso}
 
-The production baseline is a bank of lasso regressions fit per \texttt{species\_cluster}. Lasso is attractive for sparse
-solutions, but its $\ell_1$ prior is a poor match to correlated run covariates and it does not support partial pooling
-or chemistry-informed sharing across compounds. Its ``interval'' is a fixed window, not a probabilistic prediction interval.
+The production baseline is a bank of lasso regressions fit per \texttt{(species\_cluster, comp\_id)} pair. Lasso is
+attractive for sparse solutions, but its $\ell_1$ prior is a poor match to correlated run covariates and it does not
+support partial pooling or chemistry-informed sharing across compounds. Its ``interval'' is a fixed window, not a
+probabilistic prediction interval.
 
 \paragraph{Windowing in Hippopotamus.}
 In Hippopotamus, lasso coefficients are fit on a worksheet-level train split, and then a fixed window is attached using a
 hold-out split (commonly an 80/20 split by worksheet). For each \texttt{(species\_cluster, comp\_id)} model, the stored
-\texttt{window} is computed from the held-out residuals as a multiple of the residual scale (approximately ``$6\sigma$''):
+\texttt{window} is computed from the held-out residuals as a high percentile of the absolute error (approximately
+``$6\sigma$'' under a Normal error model):
 \[
-  w_{\mathrm{base}} = 6\cdot \mathrm{sd}(|\hat{y}-y|),
+  w_{\mathrm{base}} = \mathrm{quantile}_{q}(|\hat{y}-y|),\qquad q\approx 0.999999998,
 \]
 and is saved alongside the regression coefficients in the model bundle. At scoring time (Sally/Hippopotamus), the
 effective filter half-width is scaled by a global multiplier and clamped to a minimum:
@@ -364,6 +493,53 @@ effective filter half-width is scaled by a global multiplier and clamped to a mi
 with default $m=4$ and $w_{\min}=0.001$. Candidate peaks are retained when $|\hat{y}_i - y_i| \le w_i$.
 This is a pragmatic way to set windows, but it is not derived from an explicit predictive distribution and it does not
 provide row-specific uncertainty; the window depends on the chosen split and this heuristic scale rule.
+
+\begin{figure}[H]
+\centering
+\small
+\begin{tikzpicture}[scale=1.1, transform shape]
+  % Lasso point-estimate coefficients (independent per group).
+  \node[rtlatent] (b) {$b_g$};
+  \node[rtlatent, right=22mm of b] (w) {$w_g$};
+  \node[rtconst, above right=10mm and 10mm of w] (alpha) {$\lambda_{\mathrm{lasso}}$};
+
+  % Prediction + window heuristic.
+  \coordinate (bw_mid) at ($(b)!0.5!(w)$);
+  \node[rtconst, below=16mm of bw_mid] (yhat) {$\hat{y}_i$};
+  \node[rtconst, left=22mm of yhat] (x) {$x_i$};
+  \node[rtobs, below=16mm of yhat] (y) {$y_i$};
+
+  \node[rtconst, right=28mm of yhat] (wbase) {$w_{\mathrm{base}}$};
+  \node[rtconst, right=26mm of wbase] (wi) {$w_i$};
+  \node[rtconst, below=16mm of wi] (keep) {$\mathbb{I}(|\hat{y}_i-y_i|\le w_i)$};
+
+  \node[rtconst, above=12mm of wi] (m) {$m$};
+  \node[rtconst, right=10mm of m] (wmin) {$w_{\min}$};
+
+  % Edges.
+  \path[rtarrow]
+    (alpha) edge (w)
+    (b) edge[out=270, in=140] (yhat)
+    (w) edge[out=270, in=40] (yhat)
+    (x) edge (yhat)
+    (yhat) edge[out=0, in=180] (wbase)
+    (y) edge[out=0, in=240] (wbase)
+    (wbase) edge (wi)
+    (m) edge (wi)
+    (wmin) edge (wi)
+    (wi) edge (keep)
+    (yhat) edge[out=320, in=160] (keep)
+    (y) edge[out=20, in=200] (keep);
+
+  % Plates.
+  \begin{scope}[on background layer]
+    \node[rtplate, fit=(x) (yhat) (y), label=below right:{$i$}] (plate_i) {};
+    \node[rtplate, fit=(b) (w) (plate_i) (wbase) (wi) (keep), label=below right:{$g=(s,k)$}] {};
+  \end{scope}
+\end{tikzpicture}
+\caption{Plate diagram for the production supercategory lasso baseline (Hippopotamus). For each group $g=(s,k)$ (species\_cluster, comp\_id), lasso fits point-estimate coefficients $(b_g,w_g)$ and computes a fixed window $w_{\mathrm{base}}$ from held-out absolute errors; scoring scales and clamps it to $w_i=m\max(w_{\mathrm{base}},w_{\min})$ and keeps a candidate when $|\hat{y}_i-y_i|\le w_i$.}
+\label{fig:rt_lasso_plate}
+\end{figure}
 
 \section{Results (seen compounds)}
 
