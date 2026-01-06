@@ -453,7 +453,7 @@ filtering window for context.}
 Offline split evaluation is necessary but not sufficient for deployment: in production the RT model is used inside
 Sally's peak assignment pipeline as a hard filter and interacts with other stages (candidate generation, peak selection,
 and post-processing). To assess the impact in context, we ran Sally end-to-end on real sample sets using
-\nolinkurl{./scripts/sally-dev evaluate} and compared:
+\texttt{sally-dev evaluate} and compared:
 \begin{itemize}
   \item the current production baseline RT model (\textbf{supercategory lasso}, model type \texttt{ESLASSO}), and
   \item the new CompAssign partial pooling ridge model exported as stage-1 coefficient summaries
@@ -468,14 +468,12 @@ To make iteration practical, we relied on Sally's local on-disk cache to avoid e
 To support \texttt{COMPASSIGN\_PP\_RIDGE} end-to-end inside \texttt{sally-dev}, we made the following focused changes:
 \begin{itemize}
   \item \textbf{New modelType.} Added \texttt{modelType=COMPASSIGN\_PP\_RIDGE} which loads CompAssign stage-1 coefficient
-  summaries (\texttt{stage1\_coeff\_summaries\_posterior.npz} + \texttt{partial\_pool\_backoff\_summaries.npz}) and
-  computes calibrated, per-task RT windows from the predictive variance.
+  summaries and backoff summaries (both shipped as \texttt{.npz} artifacts), and computes per-task RT windows from
+  predictive variance.
   \item \textbf{RT window plumbing.} Generalized \texttt{RegressionPredictor} so RT windows can be either per-compound
   (1D) or per-(task,compound) (2D), since \texttt{COMPASSIGN\_PP\_RIDGE} produces row-specific uncertainty.
-  \item \textbf{sally-dev flag pass-through.} Added \texttt{--compassign-rt-species} and
-  \texttt{--compassign-rt-species-cluster} (ontology inputs), plus \texttt{--compassign-rt-covariates-csv} and
-  \texttt{--compassign-rt-allow-missing-task-covariates} (feature parity via a production-style RT covariates CSV). Also
-  added \texttt{--force-curate} to run the full curation pipeline for evaluation even when a sample set would normally be
+  \item \textbf{sally-dev flag pass-through.} Added CompAssign RT inputs (species, species\_cluster, and covariates CSV) and
+  \texttt{--force-curate} to run the full curation pipeline for evaluation even when a sample set would normally be
   skipped.
   \item \textbf{Evaluation reliability and covariates I/O.} Updated \texttt{sally-dev evaluate} to fail fast when the
   underlying pipeline run fails (instead of continuing with stale cached pickles), and updated the pipeline wrapper and
@@ -488,7 +486,7 @@ We evaluated five held-out cell-type SSIDs from supercategories 6 and 8. For lib
 \textbf{SSID 12307} (supercat 6), \textbf{SSID 12609} (supercat 8), and \textbf{SSID 12725} (supercat 6). For lib209:
 \textbf{SSID 23059} (supercat 6) and \textbf{SSID 20159} (supercat 8).
 For convenience and full reproducibility, \nolinkurl{src/compassign/rt/sally_test.sh} re-runs the exact SSIDs via
-\nolinkurl{external_repos/sally/scripts/sally-dev evaluate} (baseline \texttt{ESLASSO} vs candidate
+\texttt{sally-dev evaluate} (script: \path{external_repos/sally/scripts/sally-dev}; baseline \texttt{ESLASSO} vs candidate
 \texttt{COMPASSIGN\_PP\_RIDGE}) and writes outputs into fixed subdirectories under \nolinkurl{external_repos/sally/out/}.
 The script includes the exact parameters used (including covariates CSV paths) and prints a compact summary table.
 These results require the Sally checkout under \nolinkurl{external_repos/sally} to be on branch
@@ -529,11 +527,11 @@ are precision, recall, and Threat Score (TS) from \texttt{mdsutils}. Bold indica
 \toprule
 Supercat & SSID & Model & Precision & Recall & TS \\
 \midrule
-8 & 20159 & ESLASSO (supercategory lasso) & \textbf{0.8865} & \textbf{0.8697} & \textbf{0.7825} \\
-8 & 20159 & COMPASSIGN\_PP\_RIDGE (partial pooling ridge) & 0.7492 & 0.8516 & 0.6627 \\
+8 & 20159 & ESLASSO (supercategory lasso) & 0.8865 & 0.8697 & 0.7825 \\
+8 & 20159 & COMPASSIGN\_PP\_RIDGE (partial pooling ridge) & \textbf{0.8951} & \textbf{0.8766} & \textbf{0.7950} \\
 \midrule
-6 & 23059 & ESLASSO (supercategory lasso) & \textbf{0.8357} & 0.5940 & 0.5319 \\
-6 & 23059 & COMPASSIGN\_PP\_RIDGE (partial pooling ridge) & 0.7706 & \textbf{0.6409} & \textbf{0.5382} \\
+6 & 23059 & ESLASSO (supercategory lasso) & 0.8357 & 0.5940 & 0.5319 \\
+6 & 23059 & COMPASSIGN\_PP\_RIDGE (partial pooling ridge) & \textbf{0.8388} & \textbf{0.6598} & \textbf{0.5855} \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -546,68 +544,36 @@ summary pickle paths are recorded under \nolinkurl{external_repos/sally/out/} an
 
 \paragraph{Interpretation (current status).}
 Across these selected SSIDs, \texttt{COMPASSIGN\_PP\_RIDGE} improves Threat Score (TS) relative to the current lasso
-baseline on all three lib208 checks, while the two lib209 checks show mixed behavior (one slight improvement and one
-regression). These results are preliminary but are directionally consistent with the offline split evaluations for
-lib208: partial pooling with a ridge prior can stabilize RT filtering in hard cell-type supercategories.
+baseline on all three lib208 checks and both lib209 checks. These results are preliminary but are directionally
+consistent with the offline split evaluations for lib208: partial pooling with a ridge prior can stabilize RT filtering
+in hard cell-type supercategories.
 
 \paragraph{Findings so far.}
 On these selected cell-type SSIDs, \texttt{COMPASSIGN\_PP\_RIDGE} improves TS by approximately +0.10 (SSID 12307),
 +0.06 (SSID 12609), and +0.12 (SSID 12725) versus \texttt{ESLASSO} for lib208.
-For lib209, results are mixed: SSID 23059 improves TS slightly (+0.01), while SSID 20159 shows a substantial TS drop
-($-0.12$). Overall, the integration appears to be working end-to-end on both libraries, but the performance story is not
-uniform for lib209 and requires broader sampling and diagnosis.
+For lib209, \texttt{COMPASSIGN\_PP\_RIDGE} improves TS by approximately +0.01 (SSID 20159) and +0.05 (SSID 23059).
+Overall, the integration appears to be working end-to-end on both libraries and requires broader sampling to assess the
+typical magnitude of gains.
 
 \paragraph{Recommended next steps.}
 Before making a deployment decision, we recommend:
 \begin{itemize}
-  \item \textbf{Scale out evaluation.} Run the same baseline-vs-candidate comparison on a larger set of SSIDs from
-  supercategories 6 and 8 (and ideally additional cell-type supercategories), reporting both per-SSID and aggregated
-  deltas.
-  \item \textbf{Scale out lib209 and multi-lib runs.} Repeat the evaluation for lib209 (and for sample sets spanning
-  multiple libraries) with the correct per-lib ontology inputs and covariates CSV, and investigate cases where
-  \texttt{COMPASSIGN\_PP\_RIDGE} regresses (e.g., SSID 20159) to diagnose alignment/calibration issues.
+  \item \textbf{Scale out evaluation.} Run the same baseline-vs-candidate comparison on a larger set of SSIDs (including
+  multi-lib sample sets), reporting both per-SSID and aggregated deltas.
   \item \textbf{Remove manual inputs.} Implement automatic resolution of \texttt{species} and \texttt{species\_cluster}
-  for each SSID (per lib) so that \texttt{sally-dev evaluate} can be run reproducibly without hand-provided IDs.
-  \item \textbf{Confirm feature parity at runtime.} Validate that the covariates passed to Sally match CompAssign training
-  semantics exactly for all SSIDs, especially around which \texttt{ES\_\*} features are present and how missing standards
-  are imputed.
-  \item \textbf{Window calibration check.} Confirm that the default interval mapping is appropriate for peak assignment
-  (e.g., \texttt{windowMultiplier} behavior and backoff uncertainty choices) and tune/calibrate if needed based on
-  aggregate results.
-\end{itemize}
-
-\paragraph{Will this generalize to other SSIDs? What remains to make this robust?}
-The current integration is designed to generalize to other SSIDs (it scores task-level covariates for arbitrary runs and
-computes per-task RT windows), but the prototype still requires manual inputs and alignment work to be production-ready:
-\begin{itemize}
-  \item \textbf{Ontology alignment (required).} Ensure the \texttt{species} and \texttt{species\_cluster} definitions used
-  in CompAssign training are the same ontology that Sally will use at runtime (per lib). This includes stable mappings
-  from a sample set to the correct numeric \texttt{species} id and its parent \texttt{species\_cluster}.
-  \item \textbf{Automatic species resolution.} Remove the need to pass \texttt{--compassign-rt-species} manually by
-  deriving \texttt{species} (and verifying \texttt{species\_cluster}) from Sally inputs or a versioned mapping resource.
-  \item \textbf{Feature parity and missing-value policy.} Define a canonical way to build the CompAssign covariates CSV
-  for any new SSID, and ensure it matches training conventions exactly: the same set of \texttt{IS*}/\texttt{RS*}/\texttt{ES\_\*}
-  columns, the same ordering, and the same missing-value policy (CompAssign training uses 0-imputation for missing
-  covariates).
-  \item \textbf{Efficient covariates retrieval.} Ensure the runtime interface for task-level covariates is practical for
-  production (e.g., a versioned mapping resource/service or a compact per-SSID export). The current CSV-based approach is
-  suitable for evaluation and can be made memory-safe by streaming by task ID, but a long-term plan is needed to avoid
-  brittle, large-file handling.
-  \item \textbf{Window semantics and calibration.} Confirm that the mapping from CompAssign predictive uncertainty to
-  Sally's \texttt{windowMultiplier} is calibrated end-to-end (peak assignment is sensitive to windows; overly narrow
-  windows reduce recall). If needed, calibrate the multiplier or interval level on held-out sample sets.
-  \item \textbf{Multi-lib consistency.} For sample sets spanning multiple libraries, ensure the correct per-lib
-  \texttt{species} mapping is available and passed/derived so that lib208/lib209 predictions use the correct ontology and
-  artifact bundle.
-  \item \textbf{Backoff behavior for unseen groups.} Decide and document how to handle unseen \texttt{(species, comp\_id)}
-  groups at runtime (disable backoff vs. back off to hierarchical means), and whether to propagate only observation noise
-  or full prior uncertainty into the window for such groups. This choice affects recall/precision trade-offs materially.
-  \item \textbf{Artifact packaging and versioning.} Define a reproducible way to ship the \texttt{.npz} artifacts into
-  Sally (directory layout, version tags, and validation checks) so that evaluation and production runs use the intended
-  model.
+  for each SSID (per lib) so \texttt{sally-dev evaluate} can be run reproducibly without hand-provided IDs.
+  \item \textbf{Confirm end-to-end calibration.} Verify predictive window calibration (and its interaction with artifact
+  and sparsity post-processing) across a broader sample of SSIDs.
 \end{itemize}
 
 \section{Discussion}
+
+The offline split results establish that \texttt{COMPASSIGN\_PP\_RIDGE} improves RT prediction and produces calibrated
+windows, but deployment impact depends on how RT filtering interacts with Sally's full peak-assignment pipeline. On five
+real held-out SSIDs (Tables~\ref{tab:sally_prelim_cells_lib208} and \ref{tab:sally_prelim_cells_lib209}),
+\texttt{COMPASSIGN\_PP\_RIDGE} improves Threat Score (TS) versus the current \texttt{ESLASSO} baseline on all checks (lib208:
+approximately +0.10, +0.06, +0.12; lib209: approximately +0.01, +0.05). This indicates the RT gains translate into
+end-to-end improvements once post-processing (notably artifact handling) is aligned with the new RT filtering behavior.
 
 Across both libraries, the hierarchical ridge model improves point accuracy modestly but, more importantly for peak
 assignment, produces predictive windows with coverage close to the nominal 95\% target. The fast sklearn ridge baseline
