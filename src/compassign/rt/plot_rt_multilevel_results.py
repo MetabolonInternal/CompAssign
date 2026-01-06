@@ -22,7 +22,6 @@ import argparse
 from dataclasses import dataclass
 import json
 import logging
-import math
 from pathlib import Path
 import re
 from typing import Sequence
@@ -53,6 +52,19 @@ LASSO_GLOBAL_JSON = {
 COEFF_SUMMARY_MODELS_NO_ANCHOR = {
     "sklearn_ridge_species_cluster",
 }
+
+
+def _is_lasso_model(model: str) -> bool:
+    return model in LASSO_GLOBAL_JSON or model in LASSO_SUPPORT_CSV or model in LASSO_CLUSTER_CSV
+
+
+def _format_tag_for_title(tag_suffix: str) -> str:
+    if not tag_suffix:
+        return ""
+    tag = tag_suffix.removeprefix("_")
+    if tag == "full":
+        return " (full evaluation)"
+    return f" ({tag} evaluation)"
 
 
 def _setup_logging() -> None:
@@ -208,9 +220,9 @@ def _safe_model_label(model_dir_name: str) -> str:
         "pymc_pooled_species_comp_hier_supercat": "Partial pooling (intercepts)",
         "pymc_collapsed_group_species_cluster": "Ridge (supercategory)",
         "pymc_collapsed_group_species_cluster_poly2": "Ridge (supercategory) + poly2",
-        "pymc_pooled_species_comp_hier_supercat_cluster_supercat": "Ridge (partial pooling, chem-linear)",
+        "pymc_pooled_species_comp_hier_supercat_cluster_supercat": "Ridge (partial pooling)",
         "pymc_pooled_species_chem_hier_cluster_supercat": "Chem hier",
-        "sklearn_ridge_species_cluster": "Ridge (supercategory, sklearn)",
+        "sklearn_ridge_species_cluster": "Ridge (supercategory)",
         "lasso_eslasso_species_cluster": "Lasso (supercategory)",
     }
     return mapping.get(model_dir_name, model_dir_name)
@@ -366,6 +378,8 @@ def _scan_lasso_global_jsons(run_dir: Path) -> pd.DataFrame:
         m = d.get("metrics", {})
         n_test = int(d.get("n_test_rows_seen", 0))
         n_used = int(d.get("n_rows_evaluated", 0))
+        cov = float(m.get("coverage_window", m.get("coverage_95", float("nan"))))
+        width = float(m.get("window_width_mean", m.get("interval_width_mean", float("nan"))))
         rows.append(
             {
                 "lib": lib,
@@ -375,9 +389,9 @@ def _scan_lasso_global_jsons(run_dir: Path) -> pd.DataFrame:
                 "group_col": "species_cluster",
                 "rmse": float(m.get("rmse", float("nan"))),
                 "mae": float(m.get("mae", float("nan"))),
-                "cov95": float(m.get("coverage_95", float("nan"))),
+                "cov95": cov,
                 "pred_std_mean": float("nan"),
-                "interval_width_mean": float(m.get("interval_width_mean", float("nan"))),
+                "interval_width_mean": width,
                 "n_test": n_test,
                 "n_used": n_used,
                 "skipped_missing_group": max(0, int(n_test - n_used)),
@@ -492,10 +506,30 @@ def _append_lasso_support_metrics(
                 LOGGER.info("Skip missing lasso support CSV: %s", path)
                 continue
             df = pd.read_csv(path)
-            required = {"support_bin", "n_obs_test", "rmse", "coverage_95"}
-            missing = required - set(df.columns)
-            if missing:
-                raise SystemExit(f"Lasso by-support CSV missing columns {sorted(missing)}: {path}")
+            required_base = {"support_bin", "n_obs_test", "rmse"}
+            missing_base = required_base - set(df.columns)
+            if missing_base:
+                raise SystemExit(
+                    f"Lasso by-support CSV missing columns {sorted(missing_base)}: {path}"
+                )
+            cov_col = "coverage_window" if "coverage_window" in df.columns else "coverage_95"
+            width_col = (
+                "window_width_mean" if "window_width_mean" in df.columns else "interval_width_mean"
+            )
+            if cov_col not in df.columns:
+                raise SystemExit(
+                    (
+                        "Lasso by-support CSV missing coverage column "
+                        f"(expected coverage_window or coverage_95): {path}"
+                    )
+                )
+            if width_col not in df.columns:
+                raise SystemExit(
+                    (
+                        "Lasso by-support CSV missing width column "
+                        f"(expected window_width_mean or interval_width_mean): {path}"
+                    )
+                )
             df = df[df["n_obs_test"].fillna(0).astype(int) > 0].copy()
             if df.empty:
                 continue
@@ -511,9 +545,9 @@ def _append_lasso_support_metrics(
                         "n_obs_test": df["n_obs_test"].astype(int),
                         "rmse": df["rmse"].astype(float),
                         "mae": df.get("mae", float("nan")),
-                        "cov95": df["coverage_95"].astype(float),
+                        "cov95": df[cov_col].astype(float),
                         "pred_std_mean": df.get("pred_std_mean", float("nan")),
-                        "interval_width_mean": df.get("interval_width_mean", float("nan")),
+                        "interval_width_mean": df[width_col].astype(float),
                     }
                 )
             )
@@ -586,10 +620,26 @@ def _load_lasso_cluster_csv(*, path: Path, model_dir: str) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(str(path))
     df = pd.read_csv(path)
-    required = {"species_cluster", "n_obs", "rmse", "coverage_95", "interval_width_mean"}
-    missing = required - set(df.columns)
-    if missing:
-        raise SystemExit(f"Lasso by-cluster CSV missing columns {sorted(missing)}: {path}")
+    required_base = {"species_cluster", "n_obs", "rmse"}
+    missing_base = required_base - set(df.columns)
+    if missing_base:
+        raise SystemExit(f"Lasso by-cluster CSV missing columns {sorted(missing_base)}: {path}")
+    cov_col = "coverage_window" if "coverage_window" in df.columns else "coverage_95"
+    width_col = "window_width_mean" if "window_width_mean" in df.columns else "interval_width_mean"
+    if cov_col not in df.columns:
+        raise SystemExit(
+            (
+                "Lasso by-cluster CSV missing coverage column "
+                f"(expected coverage_window or coverage_95): {path}"
+            )
+        )
+    if width_col not in df.columns:
+        raise SystemExit(
+            (
+                "Lasso by-cluster CSV missing width column "
+                f"(expected window_width_mean or interval_width_mean): {path}"
+            )
+        )
     df = df[df["n_obs"].fillna(0).astype(int) > 0].copy()
     if df.empty:
         return df
@@ -597,8 +647,8 @@ def _load_lasso_cluster_csv(*, path: Path, model_dir: str) -> pd.DataFrame:
     df["species_cluster"] = df["species_cluster"].astype(int)
     n = df["n_obs"].astype(float)
     sse = np.square(df["rmse"].astype(float)) * n
-    covered = df["coverage_95"].astype(float) * n
-    width = df["interval_width_mean"].astype(float) * n
+    covered = df[cov_col].astype(float) * n
+    width = df[width_col].astype(float) * n
     return pd.DataFrame(
         {
             "species_cluster": df["species_cluster"].astype(int),
@@ -607,8 +657,8 @@ def _load_lasso_cluster_csv(*, path: Path, model_dir: str) -> pd.DataFrame:
             "covered": covered.astype(float),
             "width": width.astype(float),
             "rmse": df["rmse"].astype(float),
-            "cov95": df["coverage_95"].astype(float),
-            "interval_width_mean": df["interval_width_mean"].astype(float),
+            "cov95": df[cov_col].astype(float),
+            "interval_width_mean": df[width_col].astype(float),
             "model": str(model_dir),
         }
     )
@@ -771,7 +821,7 @@ def _plot_per_lib_cluster_panels(
         "lasso_eslasso_species_cluster": "tab:red",
     }
 
-    tag_label = f" [{tag_suffix.removeprefix('_')}]" if tag_suffix else ""
+    tag_label = _format_tag_for_title(tag_suffix)
 
     for lib in libs:
         df = cluster_df[cluster_df["lib"] == int(lib)].copy()
@@ -788,26 +838,46 @@ def _plot_per_lib_cluster_panels(
         cluster_order = order["species_cluster"].astype(int).tolist()
         x_labels = order["species_group_raw"].astype(str).tolist()
         x = np.arange(len(cluster_order))
-        width = 0.8 / max(1, len(order_models))
 
-        fig, axes = plt.subplots(nrows=3, ncols=1, figsize=(max(9.0, 1.3 * len(x_labels)), 9.0))
+        fig, axes = plt.subplots(
+            nrows=3,
+            ncols=1,
+            figsize=(max(9.0, 1.3 * len(x_labels)), 9.0),
+            sharex=True,
+        )
         metrics = [
             ("rmse", "RMSE (min)"),
-            ("cov95", "Coverage @ 95%"),
-            ("interval_width_mean", "Mean 95% interval width (min)"),
+            ("cov95", "Cov95"),
+            ("interval_width_mean", "Mean RT window width (min)"),
         ]
 
         for ax, (metric, ylabel) in zip(axes, metrics, strict=True):
-            for i, model in enumerate(order_models):
+            plot_models = order_models
+            if metric == "cov95":
+                plot_models = [m for m in order_models if not _is_lasso_model(m)]
+                if not plot_models:
+                    ax.text(
+                        0.5,
+                        0.5,
+                        "Cov95 not defined for lasso window",
+                        ha="center",
+                        va="center",
+                        transform=ax.transAxes,
+                    )
+                    ax.set_axis_off()
+                    continue
+
+            bar_width = 0.8 / max(1, len(plot_models))
+            for i, model in enumerate(plot_models):
                 sub = df[df["model"] == model].set_index("species_cluster")
                 y = [
                     float(sub.loc[sc, metric]) if sc in sub.index else float("nan")
                     for sc in cluster_order
                 ]
                 ax.bar(
-                    x + (i - (len(order_models) - 1) / 2) * width,
+                    x + (i - (len(plot_models) - 1) / 2) * bar_width,
                     y,
-                    width=width,
+                    width=bar_width,
                     label=model_labels.get(model, _safe_model_label(model)),
                     color=color_map.get(model, None),
                     alpha=0.85,
@@ -817,9 +887,15 @@ def _plot_per_lib_cluster_panels(
             if metric == "cov95":
                 ax.axhline(0.95, color="black", linewidth=1, linestyle="--", alpha=0.6)
 
+        for ax in axes[:-1]:
+            ax.label_outer()
+
         axes[-1].set_xticks(x)
-        axes[-1].set_xticklabels(x_labels, rotation=25, ha="right")
-        fig.suptitle(f"lib{lib} ({cap} -> realtest){tag_label}: metrics by species_cluster", y=1.01)
+        axes[-1].set_xticklabels(x_labels, rotation=90, ha="center")
+        fig.suptitle(
+            f"Library {lib}: Metrics by species_cluster for models trained on {cap} and evaluated on realtest{tag_label}.",
+            y=1.01,
+        )
 
         handles, labels = axes[0].get_legend_handles_labels()
         if handles:
@@ -865,7 +941,7 @@ def _plot_support_curves(
         LOGGER.warning("No requested models present in support metrics; skipping support plots.")
         return
 
-    tag_label = f" [{tag_suffix.removeprefix('_')}]" if tag_suffix else ""
+    tag_label = _format_tag_for_title(tag_suffix)
 
     color_map = {
         "pymc_collapsed_group_species": "tab:blue",
@@ -891,23 +967,36 @@ def _plot_support_curves(
         bins = [b for b in DEFAULT_SUPPORT_BIN_ORDER if b in set(df["support_bin"].astype(str))]
         x = np.arange(len(bins))
 
-        n_models = max(1, len(order_models))
-        width = 0.8 / float(n_models)
-
         fig, axes = plt.subplots(nrows=3, ncols=1, figsize=(10.0, 8.0), sharex=True)
         metrics = [
             ("rmse", "RMSE (min)"),
-            ("cov95", "Coverage @ 95%"),
-            ("interval_width_mean", "Mean 95% interval width (min)"),
+            ("cov95", "Cov95"),
+            ("interval_width_mean", "Mean RT window width (min)"),
         ]
         for ax, (metric, ylabel) in zip(axes, metrics, strict=True):
-            for i, model in enumerate(order_models):
+            plot_models = order_models
+            if metric == "cov95":
+                plot_models = [m for m in order_models if not _is_lasso_model(m)]
+                if not plot_models:
+                    ax.text(
+                        0.5,
+                        0.5,
+                        "Cov95 not defined for lasso window",
+                        ha="center",
+                        va="center",
+                        transform=ax.transAxes,
+                    )
+                    ax.set_axis_off()
+                    continue
+
+            bar_width = 0.8 / max(1, len(plot_models))
+            for i, model in enumerate(plot_models):
                 sub = df[df["model"] == model].set_index("support_bin")
                 y = [float(sub.loc[b, metric]) if b in sub.index else float("nan") for b in bins]
                 ax.bar(
-                    x + (i - (n_models - 1) / 2) * width,
+                    x + (i - (len(plot_models) - 1) / 2) * bar_width,
                     y,
-                    width=width,
+                    width=bar_width,
                     label=model_labels.get(model, _safe_model_label(model)),
                     color=color_map.get(model, None),
                     alpha=0.85,
@@ -918,9 +1007,10 @@ def _plot_support_curves(
                 ax.axhline(0.95, color="black", linewidth=1, linestyle="--", alpha=0.6)
 
         axes[2].set_xticks(x)
-        axes[2].set_xticklabels(bins)
+        axes[2].set_xticklabels(bins, rotation=90, ha="center")
         fig.suptitle(
-            f"lib{lib} ({cap} -> realtest){tag_label}: metrics by training support bin", y=1.01
+            f"Library {lib}: Metrics by training support bin for models trained on {cap} and evaluated on realtest{tag_label}.",
+            y=1.01,
         )
 
         handles, labels = axes[0].get_legend_handles_labels()
@@ -980,12 +1070,11 @@ def _plot_global_comparison(
 
     metrics = [
         ("rmse", "RMSE (min)", "linear"),
-        ("cov95", "Coverage @ 95%", "coverage"),
-        ("interval_width_mean", "Mean 95% interval width (min)", "linear"),
-        ("train_elapsed_min", "Train time (min)", "log"),
+        ("cov95", "Cov95", "coverage"),
+        ("interval_width_mean", "Mean RT window width (min)", "linear"),
     ]
 
-    tag_label = f" [{tag_suffix.removeprefix('_')}]" if tag_suffix else ""
+    tag_label = _format_tag_for_title(tag_suffix)
 
     for lib in libs:
         df = global_df[
@@ -999,22 +1088,36 @@ def _plot_global_comparison(
         df = df.set_index("model").reindex(order_models)
 
         n_metrics = int(len(metrics))
-        ncols = 2 if n_metrics > 1 else 1
-        nrows = int(math.ceil(float(n_metrics) / float(ncols)))
+        # Make the global comparison taller so the x tick labels (rotated 90 degrees) are readable.
         fig, axes = plt.subplots(
-            nrows=nrows, ncols=ncols, figsize=(3.6 * ncols, 3.2 * nrows), squeeze=False
+            nrows=1, ncols=n_metrics, figsize=(3.6 * n_metrics, 4.8), squeeze=False
         )
         axes_flat = axes.reshape(-1).tolist()
 
-        x = np.arange(len(order_models))
-        labels = [model_labels.get(m, _safe_model_label(m)) for m in order_models]
-        colors = [color_map.get(m, None) for m in order_models]
-
         for ax, (col, ylabel, kind) in zip(axes_flat[:n_metrics], metrics, strict=True):
-            y = df[col].astype(float).to_numpy()
+            plot_models = order_models
+            if kind == "coverage":
+                plot_models = [m for m in order_models if not _is_lasso_model(m)]
+                if not plot_models:
+                    ax.text(
+                        0.5,
+                        0.5,
+                        "Cov95 not defined for lasso window",
+                        ha="center",
+                        va="center",
+                        transform=ax.transAxes,
+                    )
+                    ax.set_axis_off()
+                    continue
+
+            df_metric = df.reindex(plot_models)
+            x = np.arange(len(plot_models))
+            labels = [model_labels.get(m, _safe_model_label(m)) for m in plot_models]
+            colors = [color_map.get(m, None) for m in plot_models]
+            y = df_metric[col].astype(float).to_numpy()
             ax.bar(x, y, color=colors, alpha=0.85)
             ax.set_xticks(x)
-            ax.set_xticklabels(labels, rotation=18, ha="right")
+            ax.set_xticklabels(labels, rotation=90, ha="center")
             ax.set_ylabel(ylabel)
             ax.grid(True, axis="y", alpha=0.3)
             if kind == "coverage":
@@ -1029,7 +1132,10 @@ def _plot_global_comparison(
         for ax in axes_flat[n_metrics:]:
             ax.set_axis_off()
 
-        fig.suptitle(f"lib{lib} ({cap} -> realtest){tag_label}: global comparison", y=1.01)
+        fig.suptitle(
+            f"Library {lib}: Global metrics for models trained on {cap} and evaluated on realtest{tag_label}.",
+            y=1.01,
+        )
         plt.tight_layout()
         out_path = out_dir / f"lib{lib}_global_comparison_anchor_{anchor}{tag_suffix}.png"
         plt.savefig(out_path, dpi=200, bbox_inches="tight")
