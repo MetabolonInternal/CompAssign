@@ -6,7 +6,8 @@ training Parquets and the global train/test split.
 Steps per lib:
   1) Filter merged_training_all_lib<lib>.parquet to rows whose sample_set_id
      is marked as 'test' in data/split_outputs/train_test_split_all.csv.
- 2) Attach chem_id + compound_class and drop unmapped chems.
+ 2) Attach chem_id + compound_class. Rows with missing chemistry metadata are kept
+     (chemical_id/compound_class filled with -1) to preserve RT model coverage.
  3) Convert the filtered Parquet into an RT production CSV compatible with
      the ridge RT trainers.
 

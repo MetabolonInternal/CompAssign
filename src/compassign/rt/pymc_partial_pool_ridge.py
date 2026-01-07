@@ -615,24 +615,37 @@ def train_pymc_partial_pool_ridge_from_csv(
     features_sorted = emb.features[order].astype(np.float64, copy=False)
 
     chem = np.asarray(comp_chem_unique, dtype=np.int64)
-    if np.any(chem < 0):
-        missing = sorted(set(int(x) for x in chem[chem < 0].tolist()))
-        raise ValueError(
-            "comp_id->chem_id mapping missing for some compounds "
-            f"(need chem_id for chem-linear alpha prior): {missing[:10]}"
-        )
     idx = np.searchsorted(chem_ids_sorted, chem)
-    ok = (idx >= 0) & (idx < chem_ids_sorted.size)
+    ok = (chem >= 0) & (idx >= 0) & (idx < chem_ids_sorted.size)
     if ok.any():
         ok[ok] &= chem_ids_sorted[idx[ok]] == chem[ok]
-    if not bool(np.all(ok)):
-        missing = sorted(set(int(x) for x in chem[~ok].tolist()))
-        raise ValueError(
-            "ChemBERTa embedding missing for some chem_ids in training compounds: "
-            f"{missing[:10]} (n_missing={len(missing)})"
+
+    n_missing_chem = int((chem < 0).sum())
+    n_missing_embedding = int((chem >= 0).sum()) - int(ok.sum())
+    if n_missing_chem > 0 or n_missing_embedding > 0:
+        missing_chem_examples = sorted(set(int(x) for x in chem[chem < 0].tolist()))[:10]
+        missing_emb_examples = sorted(set(int(x) for x in chem[(chem >= 0) & ~ok].tolist()))[:10]
+        logger.info(
+            "Missing chemistry metadata for some comp_ids; using mean-embedding fallback "
+            "(zc=0) for chem-linear alpha prior: missing_chem_id=%s (e.g. %s) "
+            "missing_embedding=%s (e.g. %s)",
+            n_missing_chem,
+            missing_chem_examples,
+            n_missing_embedding,
+            missing_emb_examples,
         )
-    comp_embed = features_sorted[idx]
-    alpha_z_center = np.mean(comp_embed, axis=0).astype(np.float64, copy=False)
+
+    d = int(features_sorted.shape[1])
+    comp_embed = np.empty((chem.size, d), dtype=np.float64)
+    if ok.any():
+        comp_embed[ok] = features_sorted[idx[ok]]
+        alpha_z_center = np.mean(comp_embed[ok], axis=0).astype(np.float64, copy=False)
+    else:
+        logger.warning(
+            "All compounds missing ChemBERTa embeddings; disabling chem-linear alpha prior (zc=0)"
+        )
+        alpha_z_center = np.zeros((d,), dtype=np.float64)
+    comp_embed[~ok] = alpha_z_center[None, :]
     comp_embed_zc = (comp_embed - alpha_z_center[None, :]).astype(np.float64, copy=False)
 
     fit = _fit_partial_pool_hyperparams(

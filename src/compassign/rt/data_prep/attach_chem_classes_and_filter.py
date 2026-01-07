@@ -12,7 +12,12 @@ Outputs:
   - A filtered Parquet with all original columns plus:
       - chemical_id
       - compound_class
-    Rows where chemical_id has no class are dropped (including chem_id==0).
+
+By default, this script keeps rows even when chemistry metadata is missing and fills:
+  - chemical_id = -1 when the comp_id has no mapping
+  - compound_class = -1 when the chemical_id has no class
+
+To restore the legacy behavior (drop missing chemistry metadata), pass --filter-missing.
 
 Usage example:
   python -m compassign.rt.data_prep.attach_chem_classes_and_filter \\
@@ -54,6 +59,11 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="Output Parquet (default: <stem>_chemclass.parquet)",
+    )
+    parser.add_argument(
+        "--filter-missing",
+        action="store_true",
+        help="Drop rows with missing chemical_id or compound_class (legacy behavior).",
     )
     return parser.parse_args()
 
@@ -117,6 +127,8 @@ def main() -> None:
     total_after_map = 0
     total_before_class = 0
     total_after_class = 0
+    filled_missing_map = 0
+    filled_missing_class = 0
 
     try:
         for batch in pf.iter_batches(batch_size=200_000, columns=cols_to_read):
@@ -133,18 +145,29 @@ def main() -> None:
                 df["lib_id"] = df["lib_id"].astype("Int64")
 
             merged = df.merge(map_df, on=on_cols, how="left")
-            merged = merged.dropna(subset=["chemical_id"]).copy()
-            total_after_map += int(len(merged))
-            if merged.empty:
-                continue
+            if args.filter_missing:
+                merged = merged.dropna(subset=["chemical_id"]).copy()
+                total_after_map += int(len(merged))
+                if merged.empty:
+                    continue
+            else:
+                filled_missing_map += int(merged["chemical_id"].isna().sum())
+                merged["chemical_id"] = merged["chemical_id"].fillna(-1).astype(int)
+                total_after_map += int(len(merged))
 
             merged["chemical_id"] = merged["chemical_id"].astype("Int64")
             merged = merged.merge(classes_df, on="chemical_id", how="left")
             total_before_class += int(len(merged))
-            filtered = merged.dropna(subset=["compound_class"]).copy()
-            total_after_class += int(len(filtered))
-            if filtered.empty:
-                continue
+            if args.filter_missing:
+                filtered = merged.dropna(subset=["compound_class"]).copy()
+                total_after_class += int(len(filtered))
+                if filtered.empty:
+                    continue
+            else:
+                filled_missing_class += int(merged["compound_class"].isna().sum())
+                merged["compound_class"] = merged["compound_class"].fillna(-1).astype(int)
+                filtered = merged
+                total_after_class += int(len(filtered))
 
             table = pa.Table.from_pandas(filtered, preserve_index=False)
             if writer is None:
@@ -154,17 +177,25 @@ def main() -> None:
         if writer is not None:
             writer.close()
 
-    dropped_map = total_before_map - total_after_map
-    if dropped_map > 0:
+    if args.filter_missing:
+        dropped_map = total_before_map - total_after_map
+        if dropped_map > 0:
+            print(
+                f"[attach_chem_classes] Dropped {dropped_map:,} rows with comp_id not in mapping "
+                f"({total_before_map:,} -> {total_after_map:,})"
+            )
+        dropped = total_before_class - total_after_class
         print(
-            f"[attach_chem_classes] Dropped {dropped_map:,} rows with comp_id not in mapping "
-            f"({total_before_map:,} -> {total_after_map:,})"
+            f"[attach_chem_classes] {args.input.name}: rows before={total_before_class:,}, "
+            f"after={total_after_class:,} (dropped {dropped:,} rows without compound_class)"
         )
-    dropped = total_before_class - total_after_class
-    print(
-        f"[attach_chem_classes] {args.input.name}: rows before={total_before_class:,}, "
-        f"after={total_after_class:,} (dropped {dropped:,} rows without compound_class)"
-    )
+    else:
+        print(
+            f"[attach_chem_classes] {args.input.name}: filled missing chemical_id with -1 for "
+            f"{filled_missing_map:,} rows; filled missing compound_class with -1 for "
+            f"{filled_missing_class:,} rows"
+        )
+        print(f"[attach_chem_classes] {args.input.name}: rows={total_after_class:,}")
 
     if total_after_class == 0:
         raise SystemExit(f"[attach_chem_classes] No rows written for {args.input}")
