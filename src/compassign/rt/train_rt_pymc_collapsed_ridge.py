@@ -32,7 +32,9 @@ LOGGER = logging.getLogger(__name__)
 
 
 def _setup_logging() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", force=True)
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", force=True
+    )
     for noisy in ("pymc", "pytensor", "arviz", "matplotlib"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 

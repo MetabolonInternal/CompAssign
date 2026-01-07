@@ -27,6 +27,7 @@ MODEL_DIR_REL="./new_models"
 # CompAssign covariates CSV (host path) mounted into the Sally container by pipeline.sh.
 LIB208_COV_CSV="${REPO_ROOT}/repo_export/lib208/realtest/merged_training_realtest_lib208_chemclass_rt_prod.csv"
 LIB209_COV_CSV="${REPO_ROOT}/repo_export/lib209/realtest/merged_training_realtest_lib209_chemclass_rt_prod.csv"
+RT_LATEST_RUN_FILE="${REPO_ROOT}/output/rt_prod_latest.txt"
 
 if [[ ! -d "${SALLY_DIR}" ]]; then
   echo "ERROR: Missing Sally repo: ${SALLY_DIR}" >&2
@@ -44,6 +45,64 @@ if [[ ! -f "${LIB209_COV_CSV}" ]]; then
   echo "ERROR: Missing lib209 covariates CSV: ${LIB209_COV_CSV}" >&2
   exit 2
 fi
+
+read_rt_run_dir() {
+  if [[ -f "${RT_LATEST_RUN_FILE}" ]]; then
+    local run_dir
+    run_dir="$(cat "${RT_LATEST_RUN_FILE}")"
+    if [[ -n "${run_dir}" && -d "${run_dir}" ]]; then
+      echo "${run_dir}"
+      return
+    fi
+  fi
+
+  local latest
+  latest="$(ls -dt "${REPO_ROOT}"/output/rt_prod_* 2>/dev/null | head -n 1 || true)"
+  if [[ -z "${latest}" || ! -d "${latest}" ]]; then
+    echo "ERROR: Unable to locate an RT run dir; run src/compassign/rt/train.sh first." >&2
+    exit 2
+  fi
+  echo "${latest}"
+}
+
+stage_compassign_pp_ridge_models() {
+  local run_dir
+  run_dir="$(read_rt_run_dir)"
+  echo "[sally_test] Staging COMPASSIGN_PP_RIDGE artifacts from: ${run_dir}"
+
+  for lib in 208 209; do
+    local expected_src_dir
+    expected_src_dir="${run_dir}/lib${lib}/cap100/features_none/pymc_pooled_species_comp_hier_supercat_cluster_supercat/models"
+
+    local src_dir
+    src_dir="${expected_src_dir}"
+    if [[ ! -d "${src_dir}" ]]; then
+      local match
+      match="$(find "${run_dir}/lib${lib}" -type f -name 'stage1_coeff_summaries_posterior.npz' -print -quit 2>/dev/null || true)"
+      if [[ -z "${match}" ]]; then
+        echo "ERROR: Missing stage1_coeff_summaries_posterior.npz for lib${lib} under ${run_dir}" >&2
+        exit 2
+      fi
+      src_dir="$(dirname "${match}")"
+    fi
+
+    local coeff_npz="${src_dir}/stage1_coeff_summaries_posterior.npz"
+    local backoff_npz="${src_dir}/partial_pool_backoff_summaries.npz"
+    if [[ ! -f "${coeff_npz}" ]]; then
+      echo "ERROR: Missing ${coeff_npz}" >&2
+      exit 2
+    fi
+    if [[ ! -f "${backoff_npz}" ]]; then
+      echo "ERROR: Missing ${backoff_npz}" >&2
+      exit 2
+    fi
+
+    local dest_dir="${SALLY_DIR}/new_models/compassign_pp_ridge/lib${lib}"
+    mkdir -p "${dest_dir}"
+    cp -f "${coeff_npz}" "${dest_dir}/stage1_coeff_summaries_posterior.npz"
+    cp -f "${backoff_npz}" "${dest_dir}/partial_pool_backoff_summaries.npz"
+  done
+}
 
 # Default behavior: re-run from scratch to ensure outputs match the current code.
 # To abort before deletion, Ctrl+C during the countdown below.
@@ -126,6 +185,7 @@ run_compassign_pp_ridge() {
 echo "[sally_test] Sally repo: ${SALLY_DIR}"
 echo "[sally_test] lib208 covariates CSV: ${LIB208_COV_CSV}"
 echo "[sally_test] lib209 covariates CSV: ${LIB209_COV_CSV}"
+stage_compassign_pp_ridge_models
 
 # Fixed runs used in docs/models/rt_pymc_multilevel_pooling_report.tex
 OUT_DIRS=(

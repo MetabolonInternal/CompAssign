@@ -166,8 +166,8 @@ def main() -> None:
             out["task_id"] = df_merged["task_id"].astype(int)
             out["species"] = df_merged["species"].astype(int)
             out["species_cluster"] = df_merged["species_cluster"].astype(int)
-            out["compound"] = df_merged["chemical_id"].astype(int)
-            out["compound_class"] = df_merged["compound_class"].astype(int)
+            out["compound"] = df_merged["chemical_id"].fillna(-1).astype(int)
+            out["compound_class"] = df_merged["compound_class"].fillna(-1).astype(int)
             out["rt"] = df_merged["apex_rt"].astype(float)
 
             for col in cov_cols_sorted:

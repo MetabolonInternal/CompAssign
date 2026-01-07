@@ -129,8 +129,6 @@ for lib in "${LIBS[@]}"; do
         "$input_parq" \
         --cap-per-pair "$cap" \
         --seed 42 \
-        --lib-mapping "$map_csv" \
-        --classes "$CHEM_CLASSES" \
         --species-mapping "$species_map" \
         --output "$cap_parq"
     else
