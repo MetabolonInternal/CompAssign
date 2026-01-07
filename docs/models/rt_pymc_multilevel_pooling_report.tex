@@ -633,27 +633,27 @@ and post-processing). To assess the impact in context, we ran Sally end-to-end o
 \begin{itemize}
   \item the current production baseline RT model (\textbf{supercategory lasso}, model type \texttt{ESLASSO}), and
   \item the new CompAssign partial pooling ridge model exported as stage-1 coefficient summaries
-  (model type \texttt{COMPASSIGN\_PP\_RIDGE}).
+  (model type \nolinkurl{COMPASSIGN_PP_RIDGE}).
 \end{itemize}
 
 All evaluations use the \texttt{mdsutils} metric implementation (precision/recall/Threat Score) to match current Sally
 reporting, and were run with the standard \texttt{baseline} peak-assignment method.
 To make iteration practical, we relied on Sally's local on-disk cache to avoid expensive peak fetches on repeated runs.
 
-\paragraph{What changed in Sally (summary).}
-To support \texttt{COMPASSIGN\_PP\_RIDGE} end-to-end inside \texttt{sally-dev}, we made the following focused changes:
+\paragraph{What changed in Sally (summary).}\mbox{}\\
+To support \nolinkurl{COMPASSIGN_PP_RIDGE} end-to-end inside \texttt{sally-dev}, we made the following focused changes:
 \begin{itemize}
-  \item \textbf{New modelType.} Added \texttt{modelType=COMPASSIGN\_PP\_RIDGE} which loads CompAssign stage-1 coefficient
+  \item \textbf{New modelType.} Added \nolinkurl{modelType=COMPASSIGN_PP_RIDGE} which loads CompAssign stage-1 coefficient
   summaries and backoff summaries (both shipped as \texttt{.npz} artifacts), and computes per-task RT windows from
   predictive variance.
   \item \textbf{RT window plumbing.} Generalized \texttt{RegressionPredictor} so RT windows can be either per-compound
-  (1D) or per-(task,compound) (2D), since \texttt{COMPASSIGN\_PP\_RIDGE} produces row-specific uncertainty.
+  (1D) or per-(task,compound) (2D), since \nolinkurl{COMPASSIGN_PP_RIDGE} produces row-specific uncertainty.
   \item \textbf{sally-dev flag pass-through.} Added CompAssign RT inputs (species, species\_cluster, and covariates CSV) and
   \texttt{--force-curate} to run the full curation pipeline for evaluation even when a sample set would normally be
   skipped.
   \item \textbf{Evaluation reliability and covariates I/O.} Updated \texttt{sally-dev evaluate} to fail fast when the
   underlying pipeline run fails (instead of continuing with stale cached pickles), and updated the pipeline wrapper and
-  \texttt{COMPASSIGN\_PP\_RIDGE} loader so production-style RT covariates can be mounted into the Docker container and read
+  \nolinkurl{COMPASSIGN_PP_RIDGE} loader so production-style RT covariates can be mounted into the Docker container and read
   efficiently by streaming only the required task IDs (important for multi-GB lib209 covariates CSVs).
 \end{itemize}
 
@@ -662,16 +662,17 @@ We evaluated five held-out cell-type SSIDs from supercategories 6 and 8. For lib
 \textbf{SSID 12307} (supercat 6), \textbf{SSID 12609} (supercat 8), and \textbf{SSID 12725} (supercat 6). For lib209:
 \textbf{SSID 23059} (supercat 6) and \textbf{SSID 20159} (supercat 8).
 For convenience and full reproducibility, \nolinkurl{src/compassign/rt/sally_test.sh} re-runs the exact SSIDs via
-\texttt{sally-dev evaluate} (script: \path{external_repos/sally/scripts/sally-dev}; baseline \texttt{ESLASSO} vs candidate
-\texttt{COMPASSIGN\_PP\_RIDGE}) and writes outputs into fixed subdirectories under \nolinkurl{external_repos/sally/out/}.
+\texttt{sally-dev evaluate} (script: \path{external_repos/sally/scripts/sally-dev}).
+We compare baseline \texttt{ESLASSO} vs candidate \nolinkurl{COMPASSIGN_PP_RIDGE} and write outputs into fixed
+subdirectories under \path{external_repos/sally/out/}.
 The script includes the exact parameters used (including covariates CSV paths) and prints a compact summary table.
 These results require the Sally checkout under \nolinkurl{external_repos/sally} to be on branch
-\texttt{jw/new-experimental-model}.
+\nolinkurl{jw/new-experimental-model}.
 
 \paragraph{Results.}
 Tables~\ref{tab:sally_prelim_cells_lib208} and \ref{tab:sally_prelim_cells_lib209} report the end-to-end peak-assignment
 metrics from Sally's \texttt{mdsutils} summary pickles. Higher is better for all three metrics. For each SSID, the
-baseline and \texttt{COMPASSIGN\_PP\_RIDGE} were run with the same peak-assignment method and evaluation mode.
+baseline and \nolinkurl{COMPASSIGN_PP_RIDGE} were run with the same peak-assignment method and evaluation mode.
 
 \begin{table}[H]
 \centering
@@ -683,13 +684,13 @@ are precision, recall, and Threat Score (TS) from \texttt{mdsutils}. Bold indica
 Supercat & SSID & Model & Precision & Recall & TS \\
 \midrule
 6 & 12307 & ESLASSO (supercategory lasso) & 0.8436 & 0.7848 & 0.6851 \\
-6 & 12307 & COMPASSIGN\_PP\_RIDGE (partial pooling ridge) & \textbf{0.9473} & \textbf{0.8205} & \textbf{0.7846} \\
+6 & 12307 & COMPASSIGN\_PP\_RIDGE (partial pooling ridge) & \textbf{0.9496} & \textbf{0.8033} & \textbf{0.7704} \\
 \midrule
 8 & 12609 & ESLASSO (supercategory lasso) & \textbf{0.8553} & 0.6513 & 0.5867 \\
-8 & 12609 & COMPASSIGN\_PP\_RIDGE (partial pooling ridge) & 0.8290 & \textbf{0.7464} & \textbf{0.6468} \\
+8 & 12609 & COMPASSIGN\_PP\_RIDGE (partial pooling ridge) & 0.8483 & \textbf{0.7203} & \textbf{0.6381} \\
 \midrule
 6 & 12725 & ESLASSO (supercategory lasso) & 0.6808 & \textbf{0.8610} & 0.6134 \\
-6 & 12725 & COMPASSIGN\_PP\_RIDGE (partial pooling ridge) & \textbf{0.8774} & 0.8174 & \textbf{0.7336} \\
+6 & 12725 & COMPASSIGN\_PP\_RIDGE (partial pooling ridge) & \textbf{0.8911} & 0.8098 & \textbf{0.7369} \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -712,24 +713,29 @@ Supercat & SSID & Model & Precision & Recall & TS \\
 \end{tabular}
 \end{table}
 
-\paragraph{Provenance.}
+\paragraph{Provenance.}\mbox{}\\
 Tables~\ref{tab:sally_prelim_cells_lib208} and \ref{tab:sally_prelim_cells_lib209} were computed from the \texttt{mdsutils}
-summary pickles produced by \nolinkurl{external_repos/sally/scripts/sally-dev evaluate}. The exact output directories and
-summary pickle paths are recorded under \nolinkurl{external_repos/sally/out/} and are referenced/printed by
-\nolinkurl{src/compassign/rt/sally_test.sh}.
+summary pickles produced by \texttt{sally-dev evaluate} (script: \path{external_repos/sally/scripts/sally-dev}).
+The exact output directories and summary pickle paths are recorded under \path{external_repos/sally/out/} and are
+referenced/printed by \nolinkurl{src/compassign/rt/sally_test.sh}.
 
-\paragraph{Interpretation (current status).}
-Across these selected SSIDs, \texttt{COMPASSIGN\_PP\_RIDGE} improves Threat Score (TS) relative to the current lasso
+\paragraph{Interpretation (current status).}\mbox{}\\
+Across these selected SSIDs, \nolinkurl{COMPASSIGN_PP_RIDGE} improves Threat Score (TS) relative to the current lasso
 baseline on all three lib208 checks and both lib209 checks. These results are preliminary but are directionally
 consistent with the offline split evaluations for lib208: partial pooling with a ridge prior can stabilize RT filtering
 in hard cell-type supercategories.
 
 \paragraph{Findings so far.}
-On these selected cell-type SSIDs, \texttt{COMPASSIGN\_PP\_RIDGE} improves TS by approximately +0.10 (SSID 12307),
-+0.06 (SSID 12609), and +0.12 (SSID 12725) versus \texttt{ESLASSO} for lib208.
-For lib209, \texttt{COMPASSIGN\_PP\_RIDGE} improves TS by approximately +0.01 (SSID 20159) and +0.05 (SSID 23059).
+On these selected cell-type SSIDs, \nolinkurl{COMPASSIGN_PP_RIDGE} improves TS by approximately +0.09 (SSID 12307),
++0.05 (SSID 12609), and +0.12 (SSID 12725) versus \texttt{ESLASSO} for lib208.
+For lib209, \nolinkurl{COMPASSIGN_PP_RIDGE} improves TS by approximately +0.01 (SSID 20159) and +0.05 (SSID 23059).
 Overall, the integration appears to be working end-to-end on both libraries and requires broader sampling to assess the
 typical magnitude of gains.
+
+\paragraph{Missing SMILES coverage.}
+For these cap100-trained lib208/lib209 models, all compounds included in the exported coefficient summaries had
+ChemBERTa embeddings available (0 missing chem embeddings), so the ``missing SMILES'' fallback path is not exercised in
+the Sally runs reported here.
 
 \paragraph{Recommended next steps.}
 Before making a deployment decision, we recommend:
@@ -747,8 +753,8 @@ Before making a deployment decision, we recommend:
 The offline split results establish that \texttt{COMPASSIGN\_PP\_RIDGE} improves RT prediction and produces calibrated
 windows, but deployment impact depends on how RT filtering interacts with Sally's full peak-assignment pipeline. On five
 real held-out SSIDs (Tables~\ref{tab:sally_prelim_cells_lib208} and \ref{tab:sally_prelim_cells_lib209}),
-\texttt{COMPASSIGN\_PP\_RIDGE} improves Threat Score (TS) versus the current \texttt{ESLASSO} baseline on all checks (lib208:
-approximately +0.10, +0.06, +0.12; lib209: approximately +0.01, +0.05). This indicates the RT gains translate into
+\nolinkurl{COMPASSIGN_PP_RIDGE} improves Threat Score (TS) versus the current \texttt{ESLASSO} baseline on all checks (lib208:
+approximately +0.09, +0.05, +0.12; lib209: approximately +0.01, +0.05). This indicates the RT gains translate into
 end-to-end improvements once post-processing (notably artifact handling) is aligned with the new RT filtering behavior.
 
 Across both libraries, the hierarchical ridge model improves point accuracy modestly but, more importantly for peak
