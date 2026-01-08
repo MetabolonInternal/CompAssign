@@ -559,12 +559,12 @@ entries are omitted (--) to avoid implying nominal calibration.}
 \toprule
 Lib & Model & RMSE & MAE & Cov95 & Width95 & Rows scored & Train (min) \\
 \midrule
-208 & Ridge (supercategory) & 0.009023 & 0.004673 & 0.943 & \textbf{0.023534} & \textbf{100.0\%} & \textbf{0.0} \\
-208 & Ridge (partial pooling) & \textbf{0.007874} & \textbf{0.003821} & \textbf{0.953} & 0.026681 & \textbf{100.0\%} & 107.8 \\
+208 & Ridge (supercategory) & 0.009050 & 0.004684 & 0.944 & \textbf{0.023573} & \textbf{100.0\%} & \textbf{0.0} \\
+208 & Ridge (partial pooling) & \textbf{0.007846} & \textbf{0.003817} & \textbf{0.958} & 0.028744 & \textbf{100.0\%} & 129.8 \\
 208 & Lasso (supercategory) & 0.015081 & 0.007956 & -- & -- & 94.7\% & -- \\
 \midrule
-209 & Ridge (supercategory) & 0.008317 & 0.004677 & 0.920 & \textbf{0.021393} & \textbf{100.0\%} & \textbf{0.0} \\
-209 & Ridge (partial pooling) & \textbf{0.007707} & \textbf{0.004285} & \textbf{0.956} & 0.027518 & \textbf{100.0\%} & 182.9 \\
+209 & Ridge (supercategory) & 0.008295 & 0.004631 & 0.919 & \textbf{0.020994} & \textbf{100.0\%} & \textbf{0.0} \\
+209 & Ridge (partial pooling) & \textbf{0.007589} & \textbf{0.004203} & \textbf{0.957} & 0.027094 & \textbf{100.0\%} & 230.6 \\
 209 & Lasso (supercategory) & 0.009439 & 0.004954 & -- & -- & 97.8\% & -- \\
 \bottomrule
 \end{tabular}
@@ -684,13 +684,13 @@ are precision, recall, and Threat Score (TS) from \texttt{mdsutils}. Bold indica
 Supercat & SSID & Model & Precision & Recall & TS \\
 \midrule
 6 & 12307 & ESLASSO (supercategory lasso) & 0.8436 & 0.7848 & 0.6851 \\
-6 & 12307 & COMPASSIGN\_PP\_RIDGE (partial pooling ridge) & \textbf{0.9496} & \textbf{0.8033} & \textbf{0.7704} \\
+6 & 12307 & COMPASSIGN\_PP\_RIDGE (partial pooling ridge) & \textbf{0.9537} & \textbf{0.8109} & \textbf{0.7801} \\
 \midrule
-8 & 12609 & ESLASSO (supercategory lasso) & \textbf{0.8553} & 0.6513 & 0.5867 \\
-8 & 12609 & COMPASSIGN\_PP\_RIDGE (partial pooling ridge) & 0.8483 & \textbf{0.7203} & \textbf{0.6381} \\
+8 & 12609 & ESLASSO (supercategory lasso) & 0.8553 & 0.6513 & 0.5867 \\
+8 & 12609 & COMPASSIGN\_PP\_RIDGE (partial pooling ridge) & \textbf{0.8591} & \textbf{0.8036} & \textbf{0.7101} \\
 \midrule
-6 & 12725 & ESLASSO (supercategory lasso) & 0.6808 & \textbf{0.8610} & 0.6134 \\
-6 & 12725 & COMPASSIGN\_PP\_RIDGE (partial pooling ridge) & \textbf{0.8911} & 0.8098 & \textbf{0.7369} \\
+6 & 12725 & ESLASSO (supercategory lasso) & 0.6808 & 0.8610 & 0.6134 \\
+6 & 12725 & COMPASSIGN\_PP\_RIDGE (partial pooling ridge) & \textbf{0.8587} & \textbf{0.8786} & \textbf{0.7676} \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -705,10 +705,10 @@ are precision, recall, and Threat Score (TS) from \texttt{mdsutils}. Bold indica
 Supercat & SSID & Model & Precision & Recall & TS \\
 \midrule
 8 & 20159 & ESLASSO (supercategory lasso) & 0.8865 & 0.8697 & 0.7825 \\
-8 & 20159 & COMPASSIGN\_PP\_RIDGE (partial pooling ridge) & \textbf{0.8951} & \textbf{0.8766} & \textbf{0.7950} \\
+8 & 20159 & COMPASSIGN\_PP\_RIDGE (partial pooling ridge) & \textbf{0.8967} & \textbf{0.8841} & \textbf{0.8024} \\
 \midrule
 6 & 23059 & ESLASSO (supercategory lasso) & 0.8357 & 0.5940 & 0.5319 \\
-6 & 23059 & COMPASSIGN\_PP\_RIDGE (partial pooling ridge) & \textbf{0.8388} & \textbf{0.6598} & \textbf{0.5855} \\
+6 & 23059 & COMPASSIGN\_PP\_RIDGE (partial pooling ridge) & \textbf{0.8383} & \textbf{0.6667} & \textbf{0.5907} \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -726,16 +726,18 @@ consistent with the offline split evaluations for lib208: partial pooling with a
 in hard cell-type supercategories.
 
 \paragraph{Findings so far.}
-On these selected cell-type SSIDs, \nolinkurl{COMPASSIGN_PP_RIDGE} improves TS by approximately +0.09 (SSID 12307),
-+0.05 (SSID 12609), and +0.12 (SSID 12725) versus \texttt{ESLASSO} for lib208.
-For lib209, \nolinkurl{COMPASSIGN_PP_RIDGE} improves TS by approximately +0.01 (SSID 20159) and +0.05 (SSID 23059).
+On these selected cell-type SSIDs, \nolinkurl{COMPASSIGN_PP_RIDGE} improves TS by approximately +0.10 (SSID 12307),
++0.12 (SSID 12609), and +0.15 (SSID 12725) versus \texttt{ESLASSO} for lib208.
+For lib209, \nolinkurl{COMPASSIGN_PP_RIDGE} improves TS by approximately +0.02 (SSID 20159) and +0.06 (SSID 23059).
 Overall, the integration appears to be working end-to-end on both libraries and requires broader sampling to assess the
 typical magnitude of gains.
 
 \paragraph{Missing SMILES coverage.}
-For these cap100-trained lib208/lib209 models, all compounds included in the exported coefficient summaries had
-ChemBERTa embeddings available (0 missing chem embeddings), so the ``missing SMILES'' fallback path is not exercised in
-the Sally runs reported here.
+For these cap100-trained lib208/lib209 models, the coefficient-summary artifacts include compounds with missing chemistry
+metadata (missing \texttt{chemical\_id} or missing ChemBERTa embeddings). For lib208, the trainer uses mean-embedding
+fallback for 310 compounds with missing \texttt{chemical\_id} and 138 compounds with missing embeddings; for lib209, this is
+990 and 540 compounds, respectively. This prevents coverage holes in the Sally integration (avoids ``No RT model'') at the
+cost of disabling the chemistry-informed prior mean for those compounds (chemistry term uses $z_c=0$).
 
 \paragraph{Recommended next steps.}
 Before making a deployment decision, we recommend:
@@ -754,7 +756,7 @@ The offline split results establish that \texttt{COMPASSIGN\_PP\_RIDGE} improves
 windows, but deployment impact depends on how RT filtering interacts with Sally's full peak-assignment pipeline. On five
 real held-out SSIDs (Tables~\ref{tab:sally_prelim_cells_lib208} and \ref{tab:sally_prelim_cells_lib209}),
 \nolinkurl{COMPASSIGN_PP_RIDGE} improves Threat Score (TS) versus the current \texttt{ESLASSO} baseline on all checks (lib208:
-approximately +0.09, +0.05, +0.12; lib209: approximately +0.01, +0.05). This indicates the RT gains translate into
+approximately +0.10, +0.12, +0.15; lib209: approximately +0.02, +0.06). This indicates the RT gains translate into
 end-to-end improvements once post-processing (notably artifact handling) is aligned with the new RT filtering behavior.
 
 Across both libraries, the hierarchical ridge model improves point accuracy modestly but, more importantly for peak
