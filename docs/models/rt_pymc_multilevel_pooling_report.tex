@@ -21,7 +21,10 @@
 }
 
 \setmainfont{Times New Roman}
-\setmonofont{Menlo}
+\setmonofont[Scale=0.9]{Menlo}
+
+% Render code-like identifiers without oversized monospace.
+\newcommand{\codeword}[1]{\textnormal{\detokenize{#1}}}
 
 \graphicspath{{./}{images/}{images/rt_pymc_multilevel_pooling_report/}{docs/models/}{docs/models/images/}{docs/models/images/rt_pymc_multilevel_pooling_report/}}
 
@@ -38,51 +41,57 @@
 
 \section{Introduction}
 
-Retention time (RT) is a strong auxiliary signal for peak assignment. For a given compound, we compare an observed peak
-RT to a model prediction and retain candidates that fall within an uncertainty window. This makes two properties
-critical: accurate point predictions, and \emph{calibrated} uncertainty so that a nominal ``95\% window'' contains the
-true RT about 95\% of the time.
+Sally is Metabolon’s production autocuration system for LC--MS peak assignment. For each sample set (SSID), it processes
+many LC tasks and determines, for each library compound, whether the compound is present and (if so) which observed peak
+best matches that compound. Within a single task, mass-based matching can produce multiple plausible candidate peaks, so
+Sally relies on additional evidence to reject decoys and to select the best remaining peak.
 
-In current production, the baseline is a bank of \textbf{supercategory-specific lasso regressions}. For each
-\nolinkurl{species\_cluster} (supercategory / matrix), the baseline predicts RT from run covariates
-(\texttt{IS*}/\texttt{RS*}/\texttt{ES\_\*}) using an $\ell_1$ penalty (lasso), and associates each prediction with a
-hand-tuned window rather than a probabilistic predictive distribution. The implementation and model bundle live in the
-Hippopotamus pipeline (\nolinkurl{external_repos/Hippopotamus}).
+Retention time (RT) is a key signal in this decision. For each (task, compound) pair, Sally uses an RT regression model
+to predict an expected RT, \codeword{expectedRT}. It also attaches a window half-width, \codeword{expectedRTWindow}.
+Candidate peaks are filtered by this window:
+\[
+  \lvert \text{apex\_rt} - \text{expectedRT} \rvert \le \text{expectedRTWindow}.
+\]
+If multiple peaks remain for the same compound in a task, Sally chooses the peak closest to the predicted RT after
+applying a per-compound correction factor (the median RT shift across tasks within the SSID), and then removes
+outliers with a small fixed buffer around the corrected center. Because RT enters as a hard filter, the RT window is
+operationally important: windows that are too narrow remove true peaks (false negatives), while windows that are too wide
+allow decoys to survive and can increase false positives.
 
-This baseline is useful, but it has limitations that matter for peak assignment:
-\begin{itemize}
-  \item \textbf{No partial pooling in the long tail.} Rare \nolinkurl{species} and sparse compound histories are fit
-  largely independently, which can produce noisy predictions and inconsistent calibration when training support is low.
-  \item \textbf{No chemistry-informed sharing across compounds.} Compound effects are treated as unrelated parameters,
-  so the model cannot borrow strength across chemically similar compounds when compound history is sparse.
-  \item \textbf{Heuristic uncertainty.} Window widths are not derived from a probabilistic model, so ``coverage'' is not
-  a nominal probabilistic statement and is hard to tune systematically.
-\end{itemize}
+In current production, \codeword{expectedRT} comes from a bank of supercategory-specific lasso regression models
+(\codeword{ESLASSO}). Models are partitioned by \codeword{species_matrix_type} (called \texttt{species\_cluster} in this
+report) and trained independently for each library compound using run-level covariates derived from internal standards
+(the \texttt{IS*}/\texttt{RS*}/\texttt{ES\_\*} columns). Each compound model stores point-estimate coefficients and a fixed
+per-compound RT window derived from held-out residual variation; at scoring time the window is scaled by a global
+\codeword{windowMultiplier} and clamped to a minimum width. This design is practical and fast, and it captures broad
+matrix-specific RT structure and run drift. However, it is brittle in sparse settings: rare species and infrequently
+observed compounds receive limited statistical sharing, and the $\ell_1$ penalty can behave poorly under correlated run
+covariates, leading to unstable coefficients across retrains. Moreover, fixed windows are heuristic and do not provide a
+calibrated predictive distribution, making it difficult to reason about coverage and filtering trade-offs systematically.
 
-An $\ell_1$ (lasso) prior is also a poor default for our run covariates. \texttt{IS*} and \texttt{ES\_\*} predictors are
-often strongly correlated because they capture overlapping aspects of run drift and instrument state. With correlated
-predictors, lasso tends to select an arbitrary subset and set the rest to zero, making coefficients unstable across
-retrains and creating brittle behavior on sparse groups. A ridge (Gaussian) prior is a better default here: it shrinks
-correlated covariates smoothly instead of forcing hard selection, leading to more stable predictions and uncertainty
-estimates.
+This report replaces the lasso baseline with a hierarchical Bayesian ridge regression with chemistry-informed sharing.
+The model partially pools species effects within each supercategory, regularizes compound baselines toward a
+chemistry-derived prior mean (from ChemBERTa embeddings), and uses ridge shrinkage to stabilize correlated run covariates.
+It yields a predictive distribution for RT, which we convert to task-specific RT windows for filtering. To keep training
+tractable at production scale, we analytically collapse the per-group slopes and fit the remaining hierarchy with
+variational inference. For deployment, we export compact stage-1 coefficient summaries so that Sally can score
+deterministically at runtime without running Bayesian inference.
 
-We address these issues with a hierarchical Bayesian ridge model with chemistry-informed sharing. The model improves
-long-tail stability via partial pooling across \texttt{species} nested in \texttt{species\_cluster}, regularizes
-compound baselines via a chemistry-informed prior that shares information across compounds, and provides calibrated
-uncertainty via an explicit predictive distribution.
+Finally, RT evidence is often strongest when aggregated across tasks. A false positive can survive the per-task RT window
+filter yet form an implausible across-task RT pattern for a compound. We therefore introduce an SSID-specific coherence
+check (\codeword{peak_assignment_method} = \codeword{mixture_model}) based on a two-component Bayesian Gaussian mixture fitted to
+per-compound mean RT log-likelihoods. The posterior probability of belonging to the coherent component provides a
+continuous, data-adaptive criterion for rejecting likely false positives without a fixed global threshold.
 
-For deployment, we export coefficient summaries (posterior means and variances), so scoring stays fast and simple:
-compute a linear prediction from the run covariates and attach a Normal predictive interval, without running Bayesian
-inference at runtime.
+We evaluate both offline RT metrics and end-to-end peak assignment performance on held-out test sample sets, comparing the
+hierarchical model and coherence check against the production baseline.
 
-This report trains models for lib208 and lib209 and evaluates on the corresponding realtest splits, comparing against a
-per-supercategory ridge baseline and the production lasso baseline. On these evaluations, the partial pooling model
-improves RMSE relative to the ridge baseline while keeping coverage close to the nominal 95\% target.
+\section{Methods}
 
-\section{Methods: hierarchical ridge with chemistry}
-
-This section describes the proposed model in full, starting from a high-level decomposition and then giving a complete
-probabilistic specification (likelihood, priors, and inference).
+This section describes the proposed RT model (hierarchical ridge with chemistry), the coherence check used for
+across-task rejection, and the baselines used for comparison. We start with a high-level decomposition and then give a
+complete probabilistic specification (likelihood, priors, and inference), followed by the production peak-assignment
+procedure that consumes RT predictions.
 
 \subsection{Data and notation}
 
@@ -117,7 +126,7 @@ We model RT as:
   \underbrace{\text{noise}}_{\text{residual RT variation}}.
 \]
 
-Concretely, each \textbf{(species, compound)} pair defines a group
+Concretely, each (species, compound) pair defines a group
 \[
   g = (c, k) = (\texttt{species}, \texttt{comp\_id}),
 \]
@@ -129,6 +138,187 @@ and we fit one linear regression per group:
 
 The model becomes useful in the long tail because we do \emph{not} fit each $b_{c,k}$ and $w_{c,k,1:p}$ independently:
 we place hierarchical (partially pooled) priors on intercepts and slope means, and we tie compound effects to chemistry.
+
+\subsection{Model specification (at a glance)}
+
+For reference, this section summarizes the full generative model by separating observed quantities, the likelihood, and
+priors. We also spell out the indexing to make clear what is shared across supercategories, species, compounds, and
+observations.
+
+We use the following indices and mappings:
+\begin{itemize}
+  \item observation index $i \in \{1,\ldots,N\}$ for RT rows,
+  \item run-covariate index $j \in \{1,\ldots,p\}$,
+  \item supercategory index $s$ (production \texttt{species\_cluster}),
+  \item species index $c$ (nested in a supercategory),
+  \item compound index $k$ (\texttt{comp\_id}),
+  \item chemical id $h=h(k)$ (\texttt{chemical\_id}),
+  \item embedding dimension $d \in \{1,\ldots,D\}$ (with $D=20$).
+\end{itemize}
+Row $i$ belongs to a group $g(i)=(c(i),k(i))$ and to a supercategory $s(i)$. The mapping $s(c)$ returns the
+supercategory containing species $c$, and the mapping $h(k)$ returns the chemical id for compound $k$. For chemistry,
+$z_{h,d}=e_{h,d}-\bar{e}_{d,\text{train}}$ denotes the centered ChemBERTa embedding for chemical id $h$.
+
+We observe $(y_i, x_{i,1:p}, s(i), c(i), k(i))$ for $i=1,\ldots,N$, and we treat centered ChemBERTa embeddings
+$z_{h(k),1:D}$ as fixed inputs. Hyperparameters such as $\lambda_{\mathrm{slopes}}$ and prior scales
+($\sigma_{\bullet}$) are fixed.
+
+The main model parameters are:
+\begin{itemize}
+  \item $\sigma_y$: global residual noise scale for RT (shared across all observations),
+  \item $t_0$: global RT baseline (supercategory-wide intercept),
+  \item $\mu_s$: supercategory-level intercept offset, and $\mu_c$: species-level offset within supercategory,
+  \item $\alpha_k$: compound baseline effect (shared across species) with a chemistry-informed prior mean,
+  \item $b_{c,k}$: group intercept for each (species, compound) pair, which combines $t_0$, $\mu_c$, and $\alpha_k$,
+  \item $w_{c,k,1:p}$: group slopes for run covariates (per (species, compound)), centered around hierarchical means,
+  \item $w_0$, $m_s$, $m_c$: global, supercategory, and species slope means, respectively,
+  \item $\tau$ scale parameters (e.g.\ $\tau_{\mu,s}$, $\tau_{w,s}$, $\tau_{\mathrm{comp}}$, $\tau_b$) that control the
+  strength of partial pooling (smaller $\tau$ means stronger shrinkage toward the parent level).
+\end{itemize}
+
+These parameters are shared at different levels:
+\begin{itemize}
+  \item global: $t_0$, $\sigma_y$, $w_{0,1:p}$, $\theta_{\alpha,1:D}$, $\lambda_{\mathrm{slopes}}$, and the scale
+  parameters $\tau_{\mu,\mathrm{supercat}}$, $\tau_{w,\mathrm{supercat}}$, $\tau_{\mathrm{comp}}$, and $\tau_b$,
+  \item per-supercategory: $\mu_s$, $m_{s,1:p}$, $\tau_{\mu,s}$, and $\tau_{w,s}$,
+  \item per-species: $\mu_c$ and $m_{c,1:p}$,
+  \item per-compound: $\alpha_k$ (with residual $\delta_k$),
+  \item per-(species, compound) group: $b_{c,k}$ and $w_{c,k,1:p}$.
+\end{itemize}
+
+For each row $i$, we model the observed RT $y_i$ as a noisy observation of a group-specific linear predictor. The group
+is the (species, compound) pair $g(i)=(c(i),k(i))$, and $w_{g(i),j}$ are the group slopes on centered run covariates
+$x_{i,j}$. Conditional on the group coefficients, observations are independent.
+
+\begin{subequations}
+\label{eq:rt_pp_ridge_model}
+{\small
+\begin{align}
+  y_i \mid b_{g(i)}, w_{g(i),1:p}, \sigma^2 &\sim \mathcal{N}\!\left(
+    b_{g(i)} + \sum_{j=1}^{p} x_{i,j}\,w_{g(i),j}, \sigma^2
+  \right). \label{eq:rt_pp_ridge_lik}
+\end{align}
+}
+
+We assume a single residual noise scale $\sigma_y$ shared across all observations. We use a HalfNormal prior to enforce
+positivity and to discourage implausible noise values. We write $\sigma^2=\sigma_y^2$ for convenience.
+
+{\small
+\begin{align}
+  \sigma_y &\sim \mathrm{HalfNormal}(\sigma_{y,\mathrm{prior}}), \qquad \sigma^2 = \sigma_y^2.
+  \label{eq:rt_pp_ridge_noise}
+\end{align}
+}
+
+We model systematic baseline RT differences across supercategories and species using additive offsets. Each supercategory
+has an offset $\mu_s$, and each species has an offset $\mu_c$ that is shrunk toward its supercategory mean $\mu_{s(c)}$.
+This implements partial pooling: species with little data are pulled toward the supercategory mean. We allow each
+supercategory to have its own pooling strength through $\tau_{\mu,s}$. In implementation we center these offsets to have
+mean zero so that $t_0$ remains the overall RT baseline.
+
+{\small
+\begin{equation}
+\begin{aligned}
+  \tau_{\mu,\mathrm{supercat}} &\sim \mathrm{HalfNormal}(\sigma_{\tau_\mu}), \\
+  \tau_{\mu,s} &\sim \mathrm{HalfNormal}(\sigma_{\tau_\mu}), \\
+  \mu_s \mid \tau_{\mu,\mathrm{supercat}} &\sim \mathcal{N}(0, \tau_{\mu,\mathrm{supercat}}^2), \\
+  \mu_c \mid \mu_{s(c)}, \tau_{\mu,s(c)} &\sim \mathcal{N}(\mu_{s(c)}, \tau_{\mu,s(c)}^2).
+\end{aligned}
+\label{eq:rt_pp_ridge_species_offsets}
+\end{equation}
+}
+
+The compound effect $\alpha_k$ is decomposed into a chemistry-driven prior mean plus a residual. The embedding weights
+$\theta_{\alpha,1:D}$ learn a global mapping from ChemBERTa space to RT baselines, and $\delta_k$ allows each compound to
+deviate from the chemistry-predicted mean when the data support it. The residual scale $\tau_{\mathrm{comp}}$ controls
+how strongly we trust the chemistry prior mean.
+
+Chemistry only helps when a compound can be mapped from \texttt{comp\_id} to a \texttt{chem\_id} with a ChemBERTa
+embedding (derived from a SMILES string). When this mapping or embedding is missing, we fall back to the mean embedding;
+after centering, this is equivalent to setting $z_{h(k),1:D}=0$, so the chemistry-derived part of $\alpha_k$ is $0$. In
+that case, compounds seen in training can still deviate through the residual $\delta_k$, while unseen compounds have a
+zero chemistry backoff.
+
+{\small
+\begin{equation}
+\begin{aligned}
+  \tau_{\mathrm{comp}} &\sim \mathrm{HalfNormal}(\sigma_{\tau_{\mathrm{comp}}}), \\
+  \theta_{\alpha,d} &\sim \mathcal{N}(0, \sigma_\theta^2), \qquad d=1,\ldots,D, \\
+  \delta_k \mid \tau_{\mathrm{comp}} &\sim \mathcal{N}(0, \tau_{\mathrm{comp}}^2), \\
+  \alpha_k &= \sum_{d=1}^{D} z_{h(k),d}\,\theta_{\alpha,d} + \delta_k.
+\end{aligned}
+\label{eq:rt_pp_ridge_chemistry}
+\end{equation}
+}
+
+The intercept $b_{c,k}$ is the baseline RT for compound $k$ in species $c$. We draw it around the additive baseline
+$t_0 + \mu_c + \alpha_k$ with residual scale $\tau_b$, which captures remaining between-(species, compound) variation not
+explained by the species and compound terms.
+
+{\small
+\begin{equation}
+\begin{aligned}
+  t_0 &\sim \mathcal{N}(0, \sigma_{t0}^2), \\
+  \tau_b &\sim \mathrm{HalfNormal}(\sigma_{\tau_b}), \\
+  b_{c,k} \mid t_0, \mu_c, \alpha_k, \tau_b &\sim \mathcal{N}(t_0 + \mu_c + \alpha_k, \tau_b^2).
+\end{aligned}
+\label{eq:rt_pp_ridge_intercepts}
+\end{equation}
+}
+
+Run covariates (e.g., internal-standard intensities) shift RT, and these effects can vary by species. We model this by
+placing hierarchical priors on slope means: a global mean $w_{0,j}$, a supercategory mean $m_{s,j}$, and a species mean
+$m_{c,j}$. This is another form of partial pooling: species slope means are pulled toward their supercategory means, which
+stabilizes estimates for rare species and for correlated covariates.
+
+{\small
+\begin{equation}
+\begin{aligned}
+  \tau_{w,\mathrm{supercat}} &\sim \mathrm{HalfNormal}(\sigma_{\tau_w}), \\
+  \tau_{w,s} &\sim \mathrm{HalfNormal}(\sigma_{\tau_w}), \\
+  w_{0,j} &\sim \mathcal{N}(0, \sigma_{w0}^2), \qquad j=1,\ldots,p, \\
+  m_{s,j} \mid w_{0,j}, \tau_{w,\mathrm{supercat}} &\sim \mathcal{N}(w_{0,j}, \tau_{w,\mathrm{supercat}}^2), \\
+  m_{c,j} \mid m_{s(c),j}, \tau_{w,s(c)} &\sim \mathcal{N}(m_{s(c),j}, \tau_{w,s(c)}^2).
+\end{aligned}
+\label{eq:rt_pp_ridge_slope_means}
+\end{equation}
+}
+
+Within each (species, compound) group, the slope $w_{c,k,j}$ is shrunk toward the species mean $m_{c,j}$ with strength
+controlled by $\lambda_{\mathrm{slopes}}$ (larger values mean stronger shrinkage). We use a ridge (Gaussian) prior
+because run covariates are often highly correlated: ridge shrinkage tends to distribute weight smoothly across
+correlated predictors and gives more stable fits, whereas lasso-style sparsity can arbitrarily pick one covariate and
+lead to unstable coefficients.
+
+{\small
+\begin{equation}
+  w_{c,k,j} \mid m_{c,j}, \sigma^2, \lambda_{\mathrm{slopes}} \sim \mathcal{N}(m_{c,j}, \sigma^2/\lambda_{\mathrm{slopes}}),
+  \qquad j=1,\ldots,p.
+\label{eq:rt_pp_ridge_slopes}
+\end{equation}
+}
+\end{subequations}
+
+\subsection{Generative process}
+
+Conditioned on fixed inputs $(x_{i,1:p}, z_{h,1:D})$, the model defines a generative process: it specifies a
+step-by-step way one could simulate RT observations by drawing parameters and then generating $y_i$.
+\begin{itemize}
+  \item draw global scales and baselines ($\sigma_y, t_0, w_{0,1:p}$) and chemistry weights $\theta_{\alpha,1:D}$,
+  \item for each supercategory $s$, draw offsets and slope means ($\mu_s, m_{s,1:p}$),
+  \item for each species $c$, draw offsets and slope means around its supercategory ($\mu_c, m_{c,1:p}$),
+  \item for each compound $k$, compute a chemistry-informed baseline $\alpha_k$,
+  \item for each (species, compound) pair $(c,k)$, draw group coefficients $(b_{c,k}, w_{c,k,1:p})$,
+  \item for each observation $i$, generate $y_i$ from a Normal distribution with mean
+  $b_{g(i)} + \sum_{j} x_{i,j} w_{g(i),j}$ and variance $\sigma^2$.
+\end{itemize}
+
+We assume RT is an additive linear function of run covariates plus noise, and that observations are independent once we
+condition on the group coefficients. We use one shared noise scale $\sigma_y$. Hierarchical priors provide the main
+information sharing: species offsets and slope means are pulled toward their supercategory means, with the $\tau$ pooling
+scales controlling how strong that pooling is. For slopes we use a ridge (Gaussian) prior so correlated run covariates
+behave stably. Chemistry enters only through $\alpha_k$: embeddings define a prior mean, and $\delta_k$ allows the data
+to override that mean when there is enough support.
 
 \begin{figure}[H]
 \centering
@@ -209,128 +399,15 @@ we place hierarchical (partially pooled) priors on intercepts and slope means, a
 \label{fig:rt_partial_pool_plate}
 \end{figure}
 
-\paragraph{Interpretation.}
-The intercept $b_{c,k}$ represents the baseline RT of compound $k$ in species $c$; we expect related species in the same
-supercategory to have similar baselines, and we expect chemically similar compounds to have similar baselines, so we pool
-both species and compound effects. The slope coefficients $w_{c,k,j}$ capture how run conditions shift RT; because run
-covariates are correlated, we use ridge shrinkage for stability and we pool slope means at the species and supercategory
-levels.
-
-\subsection{Likelihood}
-
-Conditioned on group-level coefficients:
-\[
-  p(\{y_i\}\mid \{b_{c,k}\}, \{w_{c,k,j}\}, \sigma^2)
-  = \prod_{i} \mathcal{N}\!\left(
-    y_i \mid b_{c(i),k(i)} + \sum_{j=1}^{p} x_{i,j}\,w_{c(i),k(i),j}, \sigma^2
-  \right).
-\]
-
-\subsection{Priors (partial pooling + chemistry)}
-
-\paragraph{What pooling means (and what ``partial pooling'' is).}
-Pooling is how a model shares information across related groups when some groups have little data. In a regression with
-many groups, there are three common extremes:
-\begin{itemize}
-  \item \textbf{No pooling:} fit each group completely independently (high variance in sparse groups).
-  \item \textbf{Full pooling:} force groups to share the same parameter (low variance, but can underfit real
-  between-group differences).
-  \item \textbf{Partial pooling:} learn group-specific parameters while shrinking them toward a shared mean, with the
-  amount of shrinkage learned from the data.
-\end{itemize}
-Hierarchical priors implement partial pooling: each group parameter is drawn from a distribution centered at a
-population-level mean, and the population scales (e.g., $\tau_{\mu,\cdot}$ and $\tau_{w,\cdot}$ below) determine how
-strongly groups are pulled together.
-
-\paragraph{Where partial pooling happens in this model.}
-Partial pooling occurs in two places. First, the intercept hierarchy pools baseline RTs across \texttt{species} within a
-\texttt{species\_cluster} (supercategory / matrix) (via $\mu_c \leftarrow \mu_{s(c)}$), stabilizing rare species. Second,
-the slope-mean hierarchy pools the run-effect means $m_{c,j}$ across \texttt{species} within each \texttt{species\_cluster},
-improving stability of run-covariate effects under correlated predictors. Separately, the compound prior pools across
-compounds through a chemistry-informed mean (ChemBERTa embeddings), which is especially helpful when a compound has
-limited history.
-
-\paragraph{Intercepts: species + compound baseline with partial pooling.}
-We shrink each group intercept toward an additive species and compound baseline:
-\[
-  b_{c,k} \sim \mathcal{N}\!\left(t_0 + \mu_c + \alpha_k,\; \tau_b^2\right).
-\]
-In this prior, $t_0$ denotes a global intercept shared across all groups, $\mu_c$ is a species-specific intercept offset,
-$\alpha_k$ is a compound baseline shared across species, and $\tau_b$ controls residual group-level variation around the
-hierarchical mean.
-
-Species offsets are pooled within supercategory:
-\[
-  \mu_s \sim \mathcal{N}(0,\tau_{\mu,\mathrm{supercat}}^2), \qquad
-  \mu_c \sim \mathcal{N}\!\left(\mu_{s(c)}, \tau_{\mu,s(c)}^2\right).
-\]
-The mapping $s(c)$ assigns each species $c$ to its enclosing \texttt{species\_cluster} $s$. $\mu_s$ is a supercategory-level
-offset, and $\tau_{\mu,\mathrm{supercat}}$ and $\tau_{\mu,s}$ control pooling strength at the supercategory and
-within-supercategory levels, respectively.
-We allow supercategory-specific pooling strength by learning $\tau_{\mu,s}$ per supercategory (with a shared prior).
-
-\paragraph{Compound effects: chemistry-informed prior mean.}
-We model the compound effect as a chemistry-driven mean plus a residual:
-\[
-  z_{h,d} = e_{h,d} - \bar{e}_{d,\text{train}}, \qquad
-  \alpha_k = \sum_{d=1}^{D} z_{h(k),d}\,\theta_{\alpha,d} + \delta_k,
-\]
-\[
-  \theta_{\alpha,d} \sim \mathcal{N}(0, \sigma_\theta^2)\quad(d=1,\ldots,D), \qquad
-  \delta_k \sim \mathcal{N}(0,\tau_{\mathrm{comp}}^2).
-\]
-Let $e_{h,d}$ be the fixed ChemBERTa embedding for chemical identifier $h$ and dimension $d$, and let $\bar{e}_{d,\text{train}}$
-be the training mean for dimension $d$; then $z_{h,d}$ is the centered embedding. The weights $\theta_{\alpha,d}$ map
-embeddings to a prior mean for the compound baseline $\alpha_k$ (with prior scale $\sigma_\theta$), while $\delta_k$ is a
-compound-specific residual with scale $\tau_{\mathrm{comp}}$.
-Centering $z_{h,d}$ by the training mean $\bar{e}_{d,\text{train}}$ and enforcing mean-zero constraints on compound
-offsets are convenient reparameterizations for identifiability with $t_0$.
-
-\paragraph{Slopes on run covariates: ridge with hierarchical slope means.}
-We use a ridge prior on per-group slopes around a species-level slope mean. For each run covariate $j=1,\ldots,p$:
-\[
-  w_{c,k,j} \sim \mathcal{N}\!\left(m_{c,j},\; \sigma^2/\lambda_{\mathrm{slopes}}\right),
-\]
-where $w_{c,k,j}$ is the slope for group $(c,k)$ on covariate $j$, $m_{c,j}$ is a species-level slope mean, $\sigma^2$ is
-the residual variance from the likelihood, and $\lambda_{\mathrm{slopes}}$ is a fixed ridge penalty (precision) that
-controls shrinkage toward $m_{c,j}$. We pool $m_{c,j}$ through the supercategory:
-\[
-  w_{0,j} \sim \mathcal{N}(0, \sigma_{w0}^2), \qquad
-  m_{s,j} \sim \mathcal{N}(w_{0,j},\tau_{w,\mathrm{supercat}}^2), \qquad
-  m_{c,j} \sim \mathcal{N}(m_{s(c),j},\tau_{w,s(c)}^2).
-\]
-In this hierarchy, $w_{0,j}$ is a global slope mean for covariate $j$ (with prior scale $\sigma_{w0}$), $m_{s,j}$ is a
-supercategory-level slope mean, and $\tau_{w,\mathrm{supercat}}$ and $\tau_{w,s}$ control pooling strength across
-supercategories and within each supercategory.
-As with the intercept hierarchy, we allow supercategory-specific pooling strength by learning $\tau_{w,s}$ per
-supercategory (with a shared prior).
-
-\paragraph{What ``ridge'' means (and why not lasso).}
-A ridge prior is a Gaussian prior on coefficients. In a linear model, this corresponds to an $\ell_2$ shrinkage penalty:
-large coefficients are discouraged, but coefficients are not driven exactly to zero.
-This behavior is a good fit for run covariates that are highly correlated (common for \texttt{IS*}/\texttt{ES\_\*}):
-ridge shrinkage distributes weight smoothly across correlated predictors and yields more stable fits.
-By contrast, lasso corresponds to a Laplace prior ($\ell_1$ penalty) and tends to select an arbitrary subset of
-correlated covariates, producing unstable coefficients across retrains and brittle behavior in sparse groups.
-
-\paragraph{Noise and scale priors.}
-We model residual noise with:
-\[
-  \sigma_y \sim \mathrm{HalfNormal}(\sigma_{y,\mathrm{prior}}), \qquad \sigma^2 = \sigma_y^2,
-\]
-and use HalfNormal priors for positive scales such as $\tau_b$, $\tau_{\mu,\mathrm{supercat}}$, $\tau_{\mu,s}$,
-$\tau_{w,\mathrm{supercat}}$, $\tau_{w,s}$, and $\tau_{\mathrm{comp}}$.
-
 \subsection{Inference and predictive uncertainty}
 
 We fit the model with variational inference (ADVI), which approximates the posterior over the hierarchical parameters
 with a tractable distribution (rather than running full MCMC). This makes training feasible at production scale.
 
-\paragraph{Collapsed slopes (why it is fast).}
-The dominant parameter count in a fully explicit model would be the per-group slope coefficients $w_{c,k,1:p}$
-(one set per \texttt{(species, comp\_id)} pair). Instead of representing all of these slopes as latent nodes in the PyMC
-graph, we \textbf{collapse} them: conditional on the ridge prior and the run covariates, the slopes can be integrated out
-analytically. In practice we precompute small per-group sufficient statistics, such as
+The dominant parameter count in a fully explicit model would be the per-group slope coefficients $w_{c,k,1:p}$ (one set per
+\texttt{(species, comp\_id)} pair). Instead of representing all of these slopes as latent nodes in the PyMC graph, we
+integrate them out analytically. Conditional on the ridge prior and the run covariates, the slopes can be integrated out,
+yielding a collapsed (marginal) likelihood. In practice we precompute small per-group sufficient statistics, such as
 $S^{xx}_{g,j\ell}=\sum_{i:g(i)=g} x_{i,j}x_{i,\ell}$ and $S^{xy}_{g,j}=\sum_{i:g(i)=g} x_{i,j}y_i$, and use the resulting
 collapsed (marginal) likelihood inside ADVI. This replaces a very large set of per-row computations with compact per-group
 summaries, which is the main speedup.
@@ -339,19 +416,19 @@ $w_{g,1:p}$.
 We still represent per-group intercepts $b_{c,k}$ explicitly because they are tied to the hierarchical prior mean
 $t_0+\mu_c+\alpha_k$.
 
-\paragraph{Stage-1 coefficient summaries.}
 After ADVI fits global and hierarchical parameters (including the intercept hierarchy and the slope-mean hierarchy), we
 recover a Gaussian posterior for each group’s coefficients in closed form and export per-group summaries for
 $\beta_{c,k,0}=b_{c,k}$ and $\beta_{c,k,j}=w_{c,k,j}$ for $j=1,\ldots,p$ (posterior mean and covariance). This exported
 artifact is what we use in production scoring: it avoids running Bayesian inference at runtime while still providing an
 explicit uncertainty estimate for RT filtering.
 
-\textbf{Approximation note:} we compute these group-wise posteriors conditional on fitted hyperparameters (typically at
-their posterior means under ADVI), rather than fully integrating over hyperparameter uncertainty.
+These group-wise posteriors are computed conditional on fitted hyperparameters (typically at their posterior means under
+ADVI), rather than fully integrating over hyperparameter uncertainty.
 
 The group-wise coefficient posterior depends on global and hierarchical parameters such as $t_0$, the pooling scales
-($\tau_{\mu,\cdot}$, $\tau_{w,\cdot}$, $\tau_{\mathrm{comp}}$), chemistry weights $\theta_{\alpha,1},\ldots,\theta_{\alpha,D}$,
-and the noise scale $\sigma_y$. A fully Bayesian prediction would average over uncertainty in these quantities; we instead
+($\tau_{\mu,\mathrm{supercat}}$, $\tau_{\mu,s}$, $\tau_{w,\mathrm{supercat}}$, $\tau_{w,s}$), the residual scales
+($\tau_{\mathrm{comp}}$, $\tau_b$), chemistry weights $\theta_{\alpha,1},\ldots,\theta_{\alpha,D}$, and the noise scale
+$\sigma_y$. A fully Bayesian prediction would average over uncertainty in these quantities; we instead
 ``plug in'' their fitted values and compute the conditional Gaussian posterior for each group in closed form. This is a
 plug-in (point-estimate) approximation (sometimes called empirical Bayes): it makes scoring simple and deterministic,
 but it can slightly understate uncertainty if hyperparameters are themselves uncertain.
@@ -373,49 +450,8 @@ covariates because it includes both residual noise and coefficient uncertainty.
 Downstream peak assignment uses this interval as a filter: a candidate peak is retained when its observed RT falls within
 the model’s window around $\hat{y}_i$.
 
-For contrast, the production lasso baseline attaches a fixed window estimated from a worksheet-level hold-out split
-(described in the lasso baseline section below).
-
-\section{Evaluation}
-
-We compare models trained on the cap100 dataset (capped at 100 observations per (species, comp\_id) pair) and
-evaluated on realtest for lib208 and lib209. This report focuses on
-\textbf{seen-compound performance}: the standard realtest evaluation where models score nearly all rows and the
-comparison is driven by accuracy and calibrated windows rather than missing-model fallbacks.
-To focus on \emph{model form} rather than feature engineering, we use the same linear run covariates for all models
-(no polynomial expansions).
-
-\paragraph{Metrics.}
-Let $y_i$ be observed RT and $\hat{y}_i$ the point prediction (minutes).
-\begin{itemize}
-  \item \textbf{RMSE}: $\sqrt{\frac{1}{n}\sum_i (\hat{y}_i - y_i)^2}$.
-  \item \textbf{MAE}: $\frac{1}{n}\sum_i |\hat{y}_i - y_i|$.
-  \item \textbf{Cov95} (ridge models): define predicted variance as
-  \[
-  \begin{aligned}
-    \widehat{\mathrm{Var}}(y_i\mid x_{i,1:p})
-    &\approx \sigma^2_{g(i)} \\
-    &\quad + \sum_{a=0}^{p}\sum_{b=0}^{p}
-      \tilde{x}_{i,a}\tilde{x}_{i,b}\,
-      \widehat{\mathrm{Cov}}\!\left(\beta_{g(i),a},\beta_{g(i),b}\right),
-  \end{aligned}
-  \]
-  with predicted standard deviation $\hat{\sigma}_i=\sqrt{\widehat{\mathrm{Var}}(y_i\mid x_{i,1:p})}$ and
-  $k_{0.95}=\Phi^{-1}(0.975)\approx 1.96$.
-  We define the nominal 95\% interval as $\hat{y}_i \pm k_{0.95}\,\hat{\sigma}_i$ and count row $i$ as ``covered'' if
-  $|\hat{y}_i - y_i| \le k_{0.95}\,\hat{\sigma}_i$; Cov95 is the empirical fraction of covered rows.
-  The terms $\sigma^2_{g(i)}$ and $\widehat{\mathrm{Cov}}(\beta_{g(i)})$ come from the exported stage-1 coefficient summaries:
-  for the sklearn ridge baseline they are computed analytically from ridge normal equations with an inverse-gamma noise prior,
-  while for the partial pooling model they are computed in closed form conditional on fitted hierarchical hyperparameters
-  (an empirical-Bayes plug-in approximation).
-  \item \textbf{Width95} (ridge models): $\frac{1}{n}\sum_i 2\cdot k_{0.95}\cdot \hat{\sigma}_i$.
-\end{itemize}
-
-In the expressions above, $g(i)$ denotes the coefficient-summary group for row $i$, and we use the augmented covariates
-$\tilde{x}_{i,0}=1$ and $\tilde{x}_{i,j}=x_{i,j}$ for $j=1,\ldots,p$.
-For the production lasso baseline, the ``window'' is a fixed filtering half-width derived from held-out residuals and then
-scaled by a global multiplier (see lasso baseline section below). This window is not calibrated to a nominal 95\% target,
-so we do not report it as Cov95/Width95.
+For contrast, the production lasso baseline attaches a fixed window estimated from held-out residual variation
+(described in Section~\ref{subsec:sally_baseline_peak_selection}).
 
 \subsection{Alternative model: supercategory ridge (sklearn)}
 
@@ -426,7 +462,6 @@ penalty for stability under correlated covariates.
 We attach an approximate Normal predictive distribution by combining an estimated noise scale with an approximate
 coefficient covariance.
 
-\paragraph{Windowing.}
 For each \texttt{(species\_cluster, comp\_id)} group this baseline stores a fitted coefficient mean, an approximate
 coefficient covariance, and an estimated residual variance $\sigma^2_g$. For a new row, we compute $\hat{y}_i$ and
 $\hat{\sigma}_i$ and use the nominal 95\% window $\hat{y}_i \pm k_{0.95}\,\hat{\sigma}_i$ (as defined above). This yields a
@@ -471,28 +506,58 @@ row-specific window rather than a fixed width per model.
 \end{figure}
 
 \subsection{Baseline currently in production: supercategory lasso}
+\label{subsec:rt_lasso_baseline}
 
 The production baseline is a bank of lasso regressions fit per \texttt{(species\_cluster, comp\_id)} pair. Lasso is
 attractive for sparse solutions, but its $\ell_1$ prior is a poor match to correlated run covariates and it does not
 support partial pooling or chemistry-informed sharing across compounds. Its ``interval'' is a fixed window, not a
 probabilistic prediction interval.
 
-\paragraph{Windowing in Hippopotamus.}
-In Hippopotamus, lasso coefficients are fit on a worksheet-level train split, and then a fixed window is attached using a
-hold-out split (commonly an 80/20 split by worksheet). For each \texttt{(species\_cluster, comp\_id)} model, the stored
-\texttt{window} is computed from the held-out residuals as a high percentile of the absolute error (approximately
-``$6\sigma$'' under a Normal error model):
+Each model stores point-estimate coefficients and a per-compound window scale derived from held-out residual variation.
+At scoring time, Sally uses this to form an RT window half-width \codeword{expectedRTWindow} and then applies it as an RT
+filter inside peak selection (described in the next subsection). Because this baseline does not expose a calibrated
+predictive distribution, the window is best viewed as a heuristic tolerance rather than a nominal prediction interval.
+
+\subsection{Baseline peak assignment in Sally: RT window filter + correction factor}
+\label{subsec:sally_baseline_peak_selection}
+
+Sally uses RT predictions in a deterministic per-task peak selection procedure. For a task $t$ and compound $c$, the RT
+model provides an expected RT $\hat\mu_{t,c}$ and an RT window half-width $w_{t,c}$. A candidate peak with apex RT $r$
+passes the RT filter when
 \[
-  w_{\mathrm{base}} = \mathrm{quantile}_{q}(|\hat{y}-y|),\qquad q\approx 0.999999998,
+  \lvert r - \hat\mu_{t,c} \rvert \le w_{t,c}.
 \]
-and is saved alongside the regression coefficients in the model bundle. At scoring time (Sally/Hippopotamus), the
-effective filter half-width is scaled by a global multiplier and clamped to a minimum:
+
+For the production lasso baseline (\codeword{ESLASSO}), each compound model stores point-estimate coefficients and a base
+window $w_{\mathrm{base},c}$ computed from held-out residuals as
 \[
-  w_i = m\cdot \max(w_{\mathrm{base}}, w_{\min}),
+  w_{\mathrm{base},c} = 6\cdot \widehat{\mathrm{sd}}(\hat{y}-y),
 \]
-with default $m=4$ and $w_{\min}=0.001$. Candidate peaks are retained when $|\hat{y}_i - y_i| \le w_i$.
-This is a pragmatic way to set windows, but it is not derived from an explicit predictive distribution and it does not
-provide row-specific uncertainty; the window depends on the chosen split and this heuristic scale rule.
+and the effective half-width used for filtering is scaled and clamped:
+\[
+  w_{t,c} = m\cdot \max(w_{\mathrm{base},c}, w_{\min}),
+\]
+with default $m=4$ and $w_{\min}=0.001$ minutes. For \codeword{COMPASSIGN_PP_RIDGE}, $w_{t,c}$ is derived from a
+predictive distribution and varies by task (Section~\ref{eq:rt_pp_ridge_model} and the predictive-variance formula in the
+inference section).
+
+After RT filtering, some tasks can still contain multiple candidate peaks for the same compound. Sally resolves this by
+computing an SSID-specific correction factor and then choosing the peak closest to the corrected center. For a retained
+peak in task $t$ for compound $c$, define the signed residual
+\[
+  \Delta_{t,c} = \hat\mu_{t,c} - r.
+\]
+The correction factor is the median shift across tasks where the compound is observed:
+\[
+  \widehat{\mathrm{CF}}_c = \mathrm{median}_{t\in\mathcal{T}_c} \Delta_{t,c}.
+\]
+Within each task, Sally keeps the peak with smallest corrected distance $|\Delta_{t,c}-\widehat{\mathrm{CF}}_c|$ and
+rejects the others. Finally, it removes outliers by keeping peaks within a fixed buffer
+\[
+  |\Delta_{t,c}-\widehat{\mathrm{CF}}_c| \le b,\qquad b=0.02 \text{ minutes}.
+\]
+The optional \codeword{iqr} method modifies only the centering step by restricting to a tighter ``central'' cloud when
+computing $\widehat{\mathrm{CF}}_c$, but it applies the same fixed buffer after centering.
 
 \begin{figure}[H]
 \centering
@@ -537,20 +602,192 @@ provide row-specific uncertainty; the window depends on the chosen split and thi
     \node[rtplate, fit=(b) (w) (plate_i) (wbase) (wi) (keep), label=below right:{$g=(s,k)$}] {};
   \end{scope}
 \end{tikzpicture}
-\caption{Plate diagram for the production supercategory lasso baseline (Hippopotamus). For each group $g=(s,k)$ (species\_cluster, comp\_id), lasso fits point-estimate coefficients $(b_g,w_g)$ and computes a fixed window $w_{\mathrm{base}}$ from held-out absolute errors; scoring scales and clamps it to $w_i=m\max(w_{\mathrm{base}},w_{\min})$ and keeps a candidate when $|\hat{y}_i-y_i|\le w_i$.}
+\caption{Schematic for the production supercategory lasso baseline (\codeword{ESLASSO}): each group $g=(s,k)$ (species\_cluster, comp\_id) stores point-estimate coefficients $(b_g,w_g)$ and a base window $w_{\mathrm{base}}$ from held-out residuals; scoring scales and clamps it to $w_i=m\max(w_{\mathrm{base}},w_{\min})$ and filters candidate peaks by the RT window.}
 \label{fig:rt_lasso_plate}
 \end{figure}
 
-\section{Results (seen compounds)}
+\subsection{RT coherence rejection via Bayesian Gaussian mixture}
+\label{subsec:rt_coherence_mixture}
+Sally's per-task selection is intentionally local: it applies a hard RT window filter, then picks the peak closest to the
+(corrected) expected RT. This removes gross decoys, but some false positives still look plausible on individual tasks and
+only become clearly inconsistent when aggregated across tasks for the same compound. We therefore add a
+\emph{compound-level} coherence check for \codeword{COMPASSIGN_PP_RIDGE} that uses a continuous RT likelihood signal across
+tasks.
+
+The default setting is \codeword{peak_assignment_method} = \codeword{mixture_model}. Conceptually, it is a two-component Bayesian
+Gaussian mixture model fitted \emph{within each SSID} to a single RT evidence score per compound.
+
+The coherence rejection can be applied to any RT model that provides an expected mean and an RT window. In this report we
+evaluate it with both \codeword{COMPASSIGN_PP_RIDGE} and \codeword{ESLASSO}. For \codeword{ESLASSO}, the score should be
+interpreted as a pseudo-likelihood because the window is heuristic rather than a calibrated predictive sd.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\linewidth]{mixture_model_example_ssid12307_lib208.png}
+\caption{Example \codeword{mixture_model} coherence check for SSID 12307 (lib208).
+Left: histogram of per-compound scores $x_c$ with the fitted two-component mixture and the
+$p(\mathrm{coherent}\mid x_c)=0.5$ decision boundary.
+Right: per-task normalized residuals $z_{t,c}$ for an example \emph{kept} compound and an example \emph{rejected}
+compound, illustrating coherent vs.\ incoherent across-task behavior.}
+\label{fig:mixture_model_example_12307}
+\end{figure}
+
+\begin{enumerate}
+  \item \emph{Per-peak RT log-likelihood.} After selecting a peak for compound $c$ in task $t$, let $r_{t,c}$ be the
+  observed apex RT and let the RT model provide an expected mean $\hat\mu_{t,c}$ and window half-width $w_{t,c}$.
+  We convert the half-width to an sd-like scale using the nominal 95\% relationship
+  $\sigma_{t,c} = w_{t,c}/z_{0.975}$ (after applying any global window multiplier). We also apply Sally's per-compound
+  correction factor $\widehat{\mathrm{CF}}_{c}$ (median RT shift across tasks within the SSID). Define the signed residual
+  $\Delta_{t,c}=\hat\mu_{t,c}-r_{t,c}$ and the standardized residual and RT log-likelihood score as
+  \[
+    z_{t,c} = \frac{\Delta_{t,c}-\widehat{\mathrm{CF}}_{c}}{\sigma_{t,c}},
+    \qquad
+    \ell_{t,c} = \log p(r_{t,c}\mid \hat\mu_{t,c},\sigma_{t,c})
+    = -\tfrac{1}{2}\Bigl(z_{t,c}^2+\log \sigma_{t,c}^2\Bigr),
+  \]
+  where $\ell_{t,c}$ is the Normal log predictive density up to an additive constant. In code this is computed as an
+  internal feature (stored as \texttt{\_rt\_loglik} during the mixture fit).
+
+  \item \emph{One scalar score per compound.} For each compound $c$ in an SSID, we aggregate over LC tasks with a selected
+  peak and define
+  \[
+    x_c = \frac{1}{n_c}\sum_{t\in \mathcal{T}_c} \ell_{t,c},
+  \]
+  where $\mathcal{T}_c$ is the set of contributing tasks and $n_c=|\mathcal{T}_c|$.
+  This compresses the across-task RT evidence for a compound into a single scalar that can be modeled across compounds.
+
+  \item \emph{Two-component Gaussian mixture within an SSID.} Within a fixed SSID, we model the set of compound scores
+  $\{x_c\}$ as coming from a mixture of two Gaussian populations:
+  \[
+    z_c \sim \mathrm{Categorical}(\pi),
+    \qquad
+    x_c\mid z_c=k \sim \mathcal{N}(\mu_k,\sigma_k^2),
+    \qquad k\in\{1,2\}.
+  \]
+  The mixture is over compounds within the SSID: each observation is a compound-level summary statistic $x_c$ (already
+  aggregated across tasks). We use conjugate priors
+  \[
+    \pi \sim \mathrm{Dirichlet}(\alpha_0,\alpha_0),
+    \qquad
+    \tau_k \equiv \sigma_k^{-2} \sim \mathrm{Gamma}(a_0,b_0),
+    \qquad
+    \mu_k\mid \tau_k \sim \mathcal{N}\!\left(m_0,\;(\kappa_0\tau_k)^{-1}\right),
+  \]
+  which is the 1D Normal--Gamma form of the Normal--Wishart prior used by variational Bayesian Gaussian mixture models. In
+  code we set $\alpha_0=0.5$ (encourages, but does not force, an imbalanced mixture) and use a small covariance
+  regularizer; remaining hyperparameters follow the library defaults.
+
+  \item \emph{Inference outputs.} We infer an approximate posterior over component parameters and compound memberships. In
+  particular, variational Bayes produces responsibilities
+  \[
+    r_{c,k} \equiv p(z_c=k\mid x_c),
+    \qquad \sum_k r_{c,k}=1,
+  \]
+  along with posterior summaries for $\pi$, $\mu_k$, and $\sigma_k^2$.
+  Implementation uses scikit-learn's variational Bayesian Gaussian mixture implementation.
+
+  \item \emph{Identifying the coherent component.} The fitted mixture produces two clusters with weights $\pi_k$ and means
+  $\mu_k$. After the per-task RT window filter, most compounds are expected to be coherent, so we label the coherent
+  cluster as the one with the larger fitted weight:
+  \[
+    k^\star = \arg\max_k \pi_k.
+  \]
+  The corresponding mean $\mu_{k^\star}$ summarizes typical coherent RT evidence in that SSID, while the other component
+  captures a lower-likelihood population. Together $(\pi_k,\mu_k,\sigma_k^2)$ define an implicit, data-driven boundary for
+  ``coherent enough'' without a fixed global threshold.
+
+  \item \emph{Rejection rule.} For each compound we compute its posterior coherence probability
+  $p_c = r_{c,k^\star}$. If $p_c<0.5$ we reject the compound (MAP under equal misclassification costs) by removing all of
+  its selected peaks from \texttt{bundle.peaks}; the standard Sally pipeline then marks the compound \texttt{IGNORE}.
+\end{enumerate}
+
+The score $x_c$ is a \emph{likelihood} under a Normal model whose scale $\sigma_{t,c}$ is derived directly from the RT
+window $w_{t,c}$. For \codeword{COMPASSIGN_PP_RIDGE}, $w_{t,c}$ is computed from a probabilistic predictive variance and
+varies by task (2D window matrix), so $z_{t,c}$ and $\ell_{t,c}$ behave like a calibrated standardized residual and log
+predictive density. This makes $x_c$ a meaningful continuous coherence signal.
+For \codeword{ESLASSO}, the RT window is a per-compound heuristic (1D; constant across tasks) rather than an inferred
+predictive sd, so after centering by $\widehat{\mathrm{CF}}_c$ the compound score $x_c$ is dominated by the window term
+$-\tfrac{1}{2}\log \sigma_{t,c}^2$ rather than residual coherence (in our runs, $\mathrm{corr}(x_c,\overline{\log\sigma^2})
+\approx -1$). The resulting mixture primarily separates compounds by their heuristic window width, which can reject many
+true compounds and reduce recall.
+
+\section{Evaluation}
+
+We compare models trained on the capped \texttt{cap100} dataset and evaluated on the held-out test split for lib208 and
+lib209. This report focuses on the standard seen-compound evaluation where models score nearly all rows and the
+comparison is driven by accuracy and calibrated windows rather than missing-model fallbacks. To focus on \emph{model form}
+rather than feature engineering, we use the same linear run covariates for all models (no polynomial expansions).
+
+\subsection{Data preparation}
+All offline training and evaluation inputs are built by \path{src/compassign/rt/prep.sh}. Starting from Pachyderm, it
+produces merged Parquets under \path{repo_export/merged_training/} and then derives the training caps and evaluation CSVs
+used throughout this report. In outline, the pipeline is:
+\begin{itemize}
+  \item \emph{Fetch training shards from Pachyderm.} Use \codeword{pachctl get file} to download
+  \codeword{create_training_data} and \codeword{combine_predictors} outputs for each library from fixed job IDs (project
+  \codeword{autocuration_platinum}) into \path{repo_export/pachyderm_rt_training_raw/}.
+  \item \emph{Assemble a combined export tree.} Copy the per-library shard trees into a stable layout under
+  \path{repo_export/pachyderm_rt_training_latest/}.
+  \item \emph{Merge shards into a single Parquet.} Run
+  \path{src/compassign/rt/data_prep/merge_pachyderm_training.py} to create
+  \path{repo_export/merged_training/merged_training_all.parquet}.
+  \item \emph{Split by library.} Run \path{src/compassign/rt/data_prep/split_merged_by_lib.py} to produce per-library
+  Parquets under \path{repo_export/merged_training/}.
+  \item \emph{Regenerate strict species mappings.} Run
+  \path{src/compassign/rt/data_prep/check_rt_metadata_mapping.py} to ensure a consistent mapping from \texttt{sample\_set\_id}
+  to \texttt{species} and \texttt{species\_cluster}.
+  \item \emph{Build capped training datasets (\texttt{cap100}).} For each (supercategory, species, compound) group, keep at
+  most 100 rows using uniform random sampling with a fixed seed (42) via
+  \path{src/compassign/rt/data_prep/build_rt_cap_datasets.sh} (which calls
+  \path{src/compassign/rt/data_prep/sample_per_species_compound.py}). These capped CSVs are the training inputs for all
+  reported models.
+  \item \emph{Build held-out test CSVs (evaluation input).} Filter the merged Parquet to SSIDs assigned to the \texttt{test}
+  fold in \path{data/split_outputs/train_test_split_all.csv} and convert each SSID to RT production-style CSVs via
+  \path{src/compassign/rt/data_prep/build_rt_real_test_csvs.py}.
+\end{itemize}
+
+\subsection{Metrics}
+Let $y_i$ be observed RT and $\hat{y}_i$ the point prediction (minutes).
+\begin{itemize}
+  \item RMSE: $\sqrt{\frac{1}{n}\sum_i (\hat{y}_i - y_i)^2}$.
+  \item MAE: $\frac{1}{n}\sum_i |\hat{y}_i - y_i|$.
+  \item Cov95 (ridge models): define predicted variance as
+  \[
+  \begin{aligned}
+    \widehat{\mathrm{Var}}(y_i\mid x_{i,1:p})
+    &\approx \sigma^2_{g(i)} \\
+    &\quad + \sum_{a=0}^{p}\sum_{b=0}^{p}
+      \tilde{x}_{i,a}\tilde{x}_{i,b}\,
+      \widehat{\mathrm{Cov}}\!\left(\beta_{g(i),a},\beta_{g(i),b}\right),
+  \end{aligned}
+  \]
+  with predicted standard deviation $\hat{\sigma}_i=\sqrt{\widehat{\mathrm{Var}}(y_i\mid x_{i,1:p})}$ and
+  $k_{0.95}=\Phi^{-1}(0.975)\approx 1.96$.
+  We define the nominal 95\% interval as $\hat{y}_i \pm k_{0.95}\,\hat{\sigma}_i$ and count row $i$ as ``covered'' if
+  $|\hat{y}_i - y_i| \le k_{0.95}\,\hat{\sigma}_i$; Cov95 is the empirical fraction of covered rows.
+  The terms $\sigma^2_{g(i)}$ and $\widehat{\mathrm{Cov}}(\beta_{g(i)})$ come from the exported stage-1 coefficient summaries:
+  for the sklearn ridge baseline they are computed analytically from ridge normal equations with an inverse-gamma noise prior,
+  while for the partial pooling model they are computed in closed form conditional on fitted hierarchical hyperparameters
+  (an empirical-Bayes plug-in approximation).
+  \item Width95 (ridge models): $\frac{1}{n}\sum_i 2\cdot k_{0.95}\cdot \hat{\sigma}_i$.
+\end{itemize}
+
+In the expressions above, $g(i)$ denotes the coefficient-summary group for row $i$, and we use the augmented covariates
+$\tilde{x}_{i,0}=1$ and $\tilde{x}_{i,j}=x_{i,j}$ for $j=1,\ldots,p$.
+For the production lasso baseline, the ``window'' is a fixed filtering half-width derived from held-out residuals and then
+scaled by a global multiplier (see Section~\ref{subsec:rt_lasso_baseline}). This window is not calibrated to a nominal
+95\% target, so we do not report it as Cov95/Width95.
+
+\section{Results: offline RT regression}
 
 \subsection{Global performance}
 
-Table~\ref{tab:global_metrics} summarizes global metrics on realtest for lib208 and lib209. Lasso baselines do not
-score all rows; \textbf{Rows scored} reflects applicability.
+Table~\ref{tab:global_metrics} summarizes global metrics on the held-out test split for lib208 and lib209. Lasso baselines do not
+score all rows; the Rows scored column reflects applicability.
 
 \begin{table}[H]
 \centering
-\caption{Global realtest metrics for cap100-trained models (linear features). Cov95/Width95 report empirical coverage and
+\caption{Global held-out test metrics for cap100-trained models (linear features). Cov95/Width95 report empirical coverage and
 mean width of the nominal 95\% Normal interval $\hat{y}_i \pm k_{0.95}\,\hat{\sigma}_i$ and are only defined for ridge
 models with an explicit predictive variance. The lasso baseline uses a heuristic fixed filtering window; its Cov95/Width95
 entries are omitted (--) to avoid implying nominal calibration.}
@@ -560,17 +797,16 @@ entries are omitted (--) to avoid implying nominal calibration.}
 Lib & Model & RMSE & MAE & Cov95 & Width95 & Rows scored & Train (min) \\
 \midrule
 208 & Ridge (supercategory) & 0.009050 & 0.004684 & 0.944 & \textbf{0.023573} & \textbf{100.0\%} & \textbf{0.0} \\
-208 & Ridge (partial pooling) & \textbf{0.007846} & \textbf{0.003817} & \textbf{0.958} & 0.028744 & \textbf{100.0\%} & 129.8 \\
+208 & Ridge (partial pooling) & \textbf{0.007846} & \textbf{0.003817} & \textbf{0.958} & 0.028744 & \textbf{100.0\%} & 131.0 \\
 208 & Lasso (supercategory) & 0.015081 & 0.007956 & -- & -- & 94.7\% & -- \\
 \midrule
 209 & Ridge (supercategory) & 0.008295 & 0.004631 & 0.919 & \textbf{0.020994} & \textbf{100.0\%} & \textbf{0.0} \\
-209 & Ridge (partial pooling) & \textbf{0.007589} & \textbf{0.004203} & \textbf{0.957} & 0.027094 & \textbf{100.0\%} & 230.6 \\
+209 & Ridge (partial pooling) & \textbf{0.007589} & \textbf{0.004203} & \textbf{0.957} & 0.027094 & \textbf{100.0\%} & 242.3 \\
 209 & Lasso (supercategory) & 0.009439 & 0.004954 & -- & -- & 97.8\% & -- \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\paragraph{Interpretation.}
 Relative to Ridge (supercategory), Ridge (partial pooling) improves RMSE while moving coverage
 closer to the nominal 0.95 target. This is desirable for peak assignment because under-coverage translates directly into
 missed true peaks when the window is used as a hard filter.
@@ -580,7 +816,7 @@ a probabilistic interval.
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.95\linewidth]{lib208_global_comparison_anchor_none_full.png}
-\caption{Global comparison across report baselines for lib208 (cap100 training, realtest evaluation). Panels show RMSE,
+\caption{Global comparison across report baselines for lib208 (cap100 training, held-out test evaluation). Panels show RMSE,
 Cov95 (ridge models only; lasso omitted), and mean RT window width (Width95 for ridge models; production filtering window
 for lasso). Tighter windows are only meaningful when coverage is comparable.}
 \label{fig:global_comparison_lib208}
@@ -589,7 +825,7 @@ for lasso). Tighter windows are only meaningful when coverage is comparable.}
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.95\linewidth]{lib209_global_comparison_anchor_none_full.png}
-\caption{Global comparison across report baselines for lib209 (cap100 training, realtest evaluation). Panels show RMSE,
+\caption{Global comparison across report baselines for lib209 (cap100 training, held-out test evaluation). Panels show RMSE,
 Cov95 (ridge models only; lasso omitted), and mean RT window width (Width95 for ridge models; production filtering window
 for lasso). Tighter windows are only meaningful when coverage is comparable.}
 \label{fig:global_comparison_lib209}
@@ -624,55 +860,35 @@ filtering window for context.}
 \label{fig:by_cluster_lib209}
 \end{figure}
 
-\section{Preliminary end-to-end Sally evaluation (real sample sets)}
+\section{Results: end-to-end Sally evaluation}
+\subsection{Setup}
 
-Offline split evaluation is necessary but not sufficient for deployment: in production the RT model is used inside
+Offline split evaluation is necessary but not sufficient for deployment: in production, the RT model is used inside
 Sally's peak assignment pipeline as a hard filter and interacts with other stages (candidate generation, peak selection,
-and post-processing). To assess the impact in context, we ran Sally end-to-end on real sample sets using
-\texttt{sally-dev evaluate} and compared:
-\begin{itemize}
-  \item the current production baseline RT model (\textbf{supercategory lasso}, model type \texttt{ESLASSO}), and
-  \item the new CompAssign partial pooling ridge model exported as stage-1 coefficient summaries
-  (model type \nolinkurl{COMPASSIGN_PP_RIDGE}).
-\end{itemize}
+and post-processing). We therefore evaluate end-to-end peak assignment using \texttt{sally-dev evaluate}.
+We compare the current production baseline RT model bundle (supercategory lasso; \codeword{ESLASSO}) against the proposed
+CompAssign partial pooling ridge bundle exported as stage-1 coefficient summaries (\codeword{COMPASSIGN_PP_RIDGE}). We
+report precision/recall/Threat Score (TS) from Sally's \texttt{mdsutils} summary.
 
-All evaluations use the \texttt{mdsutils} metric implementation (precision/recall/Threat Score) to match current Sally
-reporting, and were run with the standard \texttt{baseline} peak-assignment method.
-To make iteration practical, we relied on Sally's local on-disk cache to avoid expensive peak fetches on repeated runs.
+We also compare two peak-selection modes: Sally's standard within-task selection logic
+(\codeword{peak_assignment_method}=\codeword{baseline}) and the compound-level RT coherence rejection described in
+Section~\ref{subsec:rt_coherence_mixture} (\codeword{peak_assignment_method}=\codeword{mixture_model}). This yields a
+$2{\times}2$ ablation over (i) RT model (\codeword{ESLASSO} vs \codeword{COMPASSIGN_PP_RIDGE}) and (ii) peak assignment
+method (\codeword{baseline} vs \codeword{mixture_model}). In these runs, \codeword{COMPASSIGN_PP_RIDGE} uses a widened RT
+window multiplier ($m=4$).
 
-\paragraph{What changed in Sally (summary).}\mbox{}\\
-To support \nolinkurl{COMPASSIGN_PP_RIDGE} end-to-end inside \texttt{sally-dev}, we made the following focused changes:
-\begin{itemize}
-  \item \textbf{New modelType.} Added \nolinkurl{modelType=COMPASSIGN_PP_RIDGE} which loads CompAssign stage-1 coefficient
-  summaries and backoff summaries (both shipped as \texttt{.npz} artifacts), and computes per-task RT windows from
-  predictive variance.
-  \item \textbf{RT window plumbing.} Generalized \texttt{RegressionPredictor} so RT windows can be either per-compound
-  (1D) or per-(task,compound) (2D), since \nolinkurl{COMPASSIGN_PP_RIDGE} produces row-specific uncertainty.
-  \item \textbf{sally-dev flag pass-through.} Added CompAssign RT inputs (species, species\_cluster, and covariates CSV) and
-  \texttt{--force-curate} to run the full curation pipeline for evaluation even when a sample set would normally be
-  skipped.
-  \item \textbf{Evaluation reliability and covariates I/O.} Updated \texttt{sally-dev evaluate} to fail fast when the
-  underlying pipeline run fails (instead of continuing with stale cached pickles), and updated the pipeline wrapper and
-  \nolinkurl{COMPASSIGN_PP_RIDGE} loader so production-style RT covariates can be mounted into the Docker container and read
-  efficiently by streaming only the required task IDs (important for multi-GB lib209 covariates CSVs).
-\end{itemize}
+We evaluated eight held-out cell-type SSIDs from supercategories 6 and 8 (two SSIDs per supercategory per library),
+selected from the test fold of \path{data/split_outputs/train_test_split_all.csv}. For lib208:
+SSID 12307 and SSID 12725 (supercat 6), and SSID 12609 and SSID 13208 (supercat 8).
+For lib209: SSID 23059 and SSID 23146 (supercat 6), and SSID 20159 and SSID 20814
+(supercat 8).
+For reproducibility, \nolinkurl{src/compassign/rt/sally_test.sh} re-runs the exact SSIDs and extracts metrics from the
+\texttt{mdsutils} summary pickles. Sally integration details are listed in Appendix~\ref{app:sally_integration}.
 
-\paragraph{Selected SSIDs.}
-We evaluated five held-out cell-type SSIDs from supercategories 6 and 8. For lib208:
-\textbf{SSID 12307} (supercat 6), \textbf{SSID 12609} (supercat 8), and \textbf{SSID 12725} (supercat 6). For lib209:
-\textbf{SSID 23059} (supercat 6) and \textbf{SSID 20159} (supercat 8).
-For convenience and full reproducibility, \nolinkurl{src/compassign/rt/sally_test.sh} re-runs the exact SSIDs via
-\texttt{sally-dev evaluate} (script: \path{external_repos/sally/scripts/sally-dev}).
-We compare baseline \texttt{ESLASSO} vs candidate \nolinkurl{COMPASSIGN_PP_RIDGE} and write outputs into fixed
-subdirectories under \path{external_repos/sally/out/}.
-The script includes the exact parameters used (including covariates CSV paths) and prints a compact summary table.
-These results require the Sally checkout under \nolinkurl{external_repos/sally} to be on branch
-\nolinkurl{jw/new-experimental-model}.
-
-\paragraph{Results.}
+\subsection{Results}
 Tables~\ref{tab:sally_prelim_cells_lib208} and \ref{tab:sally_prelim_cells_lib209} report the end-to-end peak-assignment
 metrics from Sally's \texttt{mdsutils} summary pickles. Higher is better for all three metrics. For each SSID, the
-baseline and \nolinkurl{COMPASSIGN_PP_RIDGE} were run with the same peak-assignment method and evaluation mode.
+baseline and \codeword{COMPASSIGN_PP_RIDGE} were run with the same evaluation mode (\texttt{mdsutils}).
 
 \begin{table}[H]
 \centering
@@ -681,16 +897,27 @@ are precision, recall, and Threat Score (TS) from \texttt{mdsutils}. Bold indica
 \label{tab:sally_prelim_cells_lib208}
 \begin{tabular}{lllrrr}
 \toprule
-Supercat & SSID & Model & Precision & Recall & TS \\
+Supercat & SSID & Setting & Precision & Recall & TS \\
 \midrule
-6 & 12307 & ESLASSO (supercategory lasso) & 0.8436 & 0.7848 & 0.6851 \\
-6 & 12307 & COMPASSIGN\_PP\_RIDGE (partial pooling ridge) & \textbf{0.9537} & \textbf{0.8109} & \textbf{0.7801} \\
+6 & 12307 & \codeword{ESLASSO} + \codeword{baseline} & 0.8436 & 0.7848 & 0.6851 \\
+6 & 12307 & \codeword{ESLASSO} + \codeword{mixture_model} & 0.8300 & 0.4737 & 0.4318 \\
+6 & 12307 & \codeword{COMPASSIGN_PP_RIDGE} + \codeword{baseline} & 0.9390 & 0.8113 & 0.7706 \\
+6 & 12307 & \codeword{COMPASSIGN_PP_RIDGE} + \codeword{mixture_model} & \textbf{0.9480} & \textbf{0.8122} & \textbf{0.7776} \\
 \midrule
-8 & 12609 & ESLASSO (supercategory lasso) & 0.8553 & 0.6513 & 0.5867 \\
-8 & 12609 & COMPASSIGN\_PP\_RIDGE (partial pooling ridge) & \textbf{0.8591} & \textbf{0.8036} & \textbf{0.7101} \\
+6 & 12725 & \codeword{ESLASSO} + \codeword{baseline} & 0.6808 & 0.8610 & 0.6134 \\
+6 & 12725 & \codeword{ESLASSO} + \codeword{mixture_model} & 0.6808 & 0.8610 & 0.6134 \\
+6 & 12725 & \codeword{COMPASSIGN_PP_RIDGE} + \codeword{baseline} & 0.8285 & \textbf{0.8810} & 0.7451 \\
+6 & 12725 & \codeword{COMPASSIGN_PP_RIDGE} + \codeword{mixture_model} & \textbf{0.9303} & \textbf{0.8810} & \textbf{0.8264} \\
 \midrule
-6 & 12725 & ESLASSO (supercategory lasso) & 0.6808 & 0.8610 & 0.6134 \\
-6 & 12725 & COMPASSIGN\_PP\_RIDGE (partial pooling ridge) & \textbf{0.8587} & \textbf{0.8786} & \textbf{0.7676} \\
+8 & 12609 & \codeword{ESLASSO} + \codeword{baseline} & 0.8553 & 0.6513 & 0.5867 \\
+8 & 12609 & \codeword{ESLASSO} + \codeword{mixture_model} & 0.8593 & 0.5410 & 0.4970 \\
+8 & 12609 & \codeword{COMPASSIGN_PP_RIDGE} + \codeword{baseline} & 0.8417 & 0.8070 & 0.7006 \\
+8 & 12609 & \codeword{COMPASSIGN_PP_RIDGE} + \codeword{mixture_model} & \textbf{0.9320} & \textbf{0.8073} & \textbf{0.7624} \\
+\midrule
+8 & 13208 & \codeword{ESLASSO} + \codeword{baseline} & 0.8931 & 0.7930 & 0.7243 \\
+8 & 13208 & \codeword{ESLASSO} + \codeword{mixture_model} & 0.8931 & 0.7930 & 0.7243 \\
+8 & 13208 & \codeword{COMPASSIGN_PP_RIDGE} + \codeword{baseline} & 0.8546 & 0.7930 & 0.6987 \\
+8 & 13208 & \codeword{COMPASSIGN_PP_RIDGE} + \codeword{mixture_model} & \textbf{0.9555} & \textbf{0.7973} & \textbf{0.7688} \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -702,84 +929,91 @@ are precision, recall, and Threat Score (TS) from \texttt{mdsutils}. Bold indica
 \label{tab:sally_prelim_cells_lib209}
 \begin{tabular}{lllrrr}
 \toprule
-Supercat & SSID & Model & Precision & Recall & TS \\
+Supercat & SSID & Setting & Precision & Recall & TS \\
 \midrule
-8 & 20159 & ESLASSO (supercategory lasso) & 0.8865 & 0.8697 & 0.7825 \\
-8 & 20159 & COMPASSIGN\_PP\_RIDGE (partial pooling ridge) & \textbf{0.8967} & \textbf{0.8841} & \textbf{0.8024} \\
+6 & 23059 & \codeword{ESLASSO} + \codeword{baseline} & 0.8357 & 0.5940 & 0.5319 \\
+6 & 23059 & \codeword{ESLASSO} + \codeword{mixture_model} & 0.8357 & 0.5940 & 0.5319 \\
+6 & 23059 & \codeword{COMPASSIGN_PP_RIDGE} + \codeword{baseline} & 0.8164 & \textbf{0.6868} & 0.5949 \\
+6 & 23059 & \codeword{COMPASSIGN_PP_RIDGE} + \codeword{mixture_model} & \textbf{0.8913} & 0.6852 & \textbf{0.6324} \\
 \midrule
-6 & 23059 & ESLASSO (supercategory lasso) & 0.8357 & 0.5940 & 0.5319 \\
-6 & 23059 & COMPASSIGN\_PP\_RIDGE (partial pooling ridge) & \textbf{0.8383} & \textbf{0.6667} & \textbf{0.5907} \\
+6 & 23146 & \codeword{ESLASSO} + \codeword{baseline} & 0.6732 & 0.8257 & 0.5894 \\
+6 & 23146 & \codeword{ESLASSO} + \codeword{mixture_model} & 0.6732 & 0.8257 & 0.5894 \\
+6 & 23146 & \codeword{COMPASSIGN_PP_RIDGE} + \codeword{baseline} & 0.6800 & 0.8686 & 0.6166 \\
+6 & 23146 & \codeword{COMPASSIGN_PP_RIDGE} + \codeword{mixture_model} & \textbf{0.9857} & \textbf{0.8692} & \textbf{0.8584} \\
+\midrule
+8 & 20159 & \codeword{ESLASSO} + \codeword{baseline} & 0.8865 & 0.8697 & 0.7825 \\
+8 & 20159 & \codeword{ESLASSO} + \codeword{mixture_model} & 0.8865 & 0.8697 & 0.7825 \\
+8 & 20159 & \codeword{COMPASSIGN_PP_RIDGE} + \codeword{baseline} & 0.8906 & \textbf{0.8848} & 0.7980 \\
+8 & 20159 & \codeword{COMPASSIGN_PP_RIDGE} + \codeword{mixture_model} & \textbf{0.9871} & \textbf{0.8848} & \textbf{0.8747} \\
+\midrule
+8 & 20814 & \codeword{ESLASSO} + \codeword{baseline} & 0.9123 & 0.8695 & 0.8024 \\
+8 & 20814 & \codeword{ESLASSO} + \codeword{mixture_model} & 0.9123 & 0.8695 & 0.8024 \\
+8 & 20814 & \codeword{COMPASSIGN_PP_RIDGE} + \codeword{baseline} & 0.9194 & \textbf{0.8783} & 0.8155 \\
+8 & 20814 & \codeword{COMPASSIGN_PP_RIDGE} + \codeword{mixture_model} & \textbf{0.9687} & 0.8753 & \textbf{0.8513} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\paragraph{Provenance.}\mbox{}\\
-Tables~\ref{tab:sally_prelim_cells_lib208} and \ref{tab:sally_prelim_cells_lib209} were computed from the \texttt{mdsutils}
-summary pickles produced by \texttt{sally-dev evaluate} (script: \path{external_repos/sally/scripts/sally-dev}).
-The exact output directories and summary pickle paths are recorded under \path{external_repos/sally/out/} and are
-referenced/printed by \nolinkurl{src/compassign/rt/sally_test.sh}.
+Across these eight SSIDs, the strongest setting is consistently the combination of \codeword{COMPASSIGN_PP_RIDGE} with
+\codeword{mixture_model}, which improves TS relative to the production \codeword{ESLASSO} baseline for all eight checks.
+Within \codeword{COMPASSIGN_PP_RIDGE}, \codeword{mixture_model} improves TS versus \codeword{baseline} in every case.
+In contrast, applying \codeword{mixture_model} to \codeword{ESLASSO} does not help and can substantially reduce recall/TS
+(e.g.\ SSIDs 12307 and 12609 in Table~\ref{tab:sally_prelim_cells_lib208}).
 
-\paragraph{Interpretation (current status).}\mbox{}\\
-Across these selected SSIDs, \nolinkurl{COMPASSIGN_PP_RIDGE} improves Threat Score (TS) relative to the current lasso
-baseline on all three lib208 checks and both lib209 checks. These results are preliminary but are directionally
-consistent with the offline split evaluations for lib208: partial pooling with a ridge prior can stabilize RT filtering
-in hard cell-type supercategories.
+\subsection{Notes}
+The \texttt{mdsutils} TS in Tables~\ref{tab:sally_prelim_cells_lib208} and \ref{tab:sally_prelim_cells_lib209} includes
+false negatives for curated internal standards and X-compounds, which are omitted from production outputs by design.
+We therefore treat these TS values as conservative when judging production impact, and interpret TS deltas in the context
+of the ``do not call standards / X-compounds'' constraint.
 
-\paragraph{Findings so far.}
-On these selected cell-type SSIDs, \nolinkurl{COMPASSIGN_PP_RIDGE} improves TS by approximately +0.10 (SSID 12307),
-+0.12 (SSID 12609), and +0.15 (SSID 12725) versus \texttt{ESLASSO} for lib208.
-For lib209, \nolinkurl{COMPASSIGN_PP_RIDGE} improves TS by approximately +0.02 (SSID 20159) and +0.06 (SSID 23059).
-Overall, the integration appears to be working end-to-end on both libraries and requires broader sampling to assess the
-typical magnitude of gains.
-
-\paragraph{Missing SMILES coverage.}
 For these cap100-trained lib208/lib209 models, the coefficient-summary artifacts include compounds with missing chemistry
 metadata (missing \texttt{chemical\_id} or missing ChemBERTa embeddings). For lib208, the trainer uses mean-embedding
 fallback for 310 compounds with missing \texttt{chemical\_id} and 138 compounds with missing embeddings; for lib209, this is
 990 and 540 compounds, respectively. This prevents coverage holes in the Sally integration (avoids ``No RT model'') at the
 cost of disabling the chemistry-informed prior mean for those compounds (chemistry term uses $z_c=0$).
 
-\paragraph{Recommended next steps.}
-Before making a deployment decision, we recommend:
-\begin{itemize}
-  \item \textbf{Scale out evaluation.} Run the same baseline-vs-candidate comparison on a larger set of SSIDs (including
-  multi-lib sample sets), reporting both per-SSID and aggregated deltas.
-  \item \textbf{Remove manual inputs.} Implement automatic resolution of \texttt{species} and \texttt{species\_cluster}
-  for each SSID (per lib) so \texttt{sally-dev evaluate} can be run reproducibly without hand-provided IDs.
-  \item \textbf{Confirm end-to-end calibration.} Verify predictive window calibration (and its interaction with artifact
-  and sparsity post-processing) across a broader sample of SSIDs.
-\end{itemize}
+\section{Discussion and conclusion}
 
-\section{Discussion}
+\subsection{Summary of findings}
+Offline split evaluation shows that \codeword{COMPASSIGN_PP_RIDGE} improves RT prediction and produces RT windows with
+coverage close to the nominal 95\% target. This matters because Sally uses RT windows as a hard filter: if the window is
+too narrow, true peaks are removed (false negatives); if it is too wide, decoys survive and can become false positives.
+Relative to the fast supercategory ridge baseline, the hierarchical model improves RMSE while reducing under-coverage.
 
-The offline split results establish that \texttt{COMPASSIGN\_PP\_RIDGE} improves RT prediction and produces calibrated
-windows, but deployment impact depends on how RT filtering interacts with Sally's full peak-assignment pipeline. On five
-real held-out SSIDs (Tables~\ref{tab:sally_prelim_cells_lib208} and \ref{tab:sally_prelim_cells_lib209}),
-\nolinkurl{COMPASSIGN_PP_RIDGE} improves Threat Score (TS) versus the current \texttt{ESLASSO} baseline on all checks (lib208:
-approximately +0.10, +0.12, +0.15; lib209: approximately +0.02, +0.06). This indicates the RT gains translate into
-end-to-end improvements once post-processing (notably artifact handling) is aligned with the new RT filtering behavior.
+End-to-end evaluation inside Sally confirms these improvements translate to peak assignment performance when combined with
+the across-task coherence check. On eight held-out SSIDs (Tables~\ref{tab:sally_prelim_cells_lib208} and
+\ref{tab:sally_prelim_cells_lib209}), \codeword{COMPASSIGN_PP_RIDGE} with \codeword{mixture_model} improves Threat Score
+(TS) versus the current \codeword{ESLASSO} baseline on all checks (lib208: approximately +0.04 to +0.21; lib209:
+approximately +0.05 to +0.27). Within \codeword{COMPASSIGN_PP_RIDGE}, the coherence check improves TS versus the baseline
+within-task peak picker for every SSID evaluated. This supports the central hypothesis: RT evidence is often strongest
+when aggregated across tasks, and a compound-level coherence score can remove false positives that survive per-task
+filtering.
 
-Across both libraries, the hierarchical ridge model improves point accuracy modestly but, more importantly for peak
-assignment, produces predictive windows with coverage close to the nominal 95\% target. The fast sklearn ridge baseline
-is competitive in RMSE but systematically under-covers because its predictive variance is optimistic for many
-supercategory--compound pairs. In a pipeline that uses RT windows as a hard filter, this under-coverage is not a cosmetic
-issue: it directly increases the probability that the true peak is excluded from consideration.
+\subsection{Why the coherence score works}
+The mixture-based coherence check is most reliable when the underlying RT model produces a calibrated predictive sd. For
+\codeword{COMPASSIGN_PP_RIDGE}, the per-task window is derived from an explicit predictive variance, so the per-task RT
+log-likelihood behaves like a standardized residual score. This makes the compound score $x_c$ a meaningful continuous
+signal and allows the mixture model to adapt its separation boundary to each SSID.
 
-The hierarchical model is designed around the data realities of RT regression. Species--compound history is sparse and
-heavy-tailed, so independent per-group fits are unstable in the tail. Partial pooling addresses this by shrinking group
-intercepts and slope means toward supercategory-aware priors, improving stability without sacrificing head performance.
-Chemistry enters as a prior mean for compound effects, which lets the model share information across chemically similar
-compounds and stabilizes estimates when per-compound support is limited.
+By contrast, for \codeword{ESLASSO} the window is heuristic and constant across tasks, so the same score behaves like a
+pseudo-likelihood and can be dominated by window width rather than true coherence. In practice this can lead to
+over-rejection and recall loss on some SSIDs. This difference highlights a key practical point: if RT uncertainty is used
+downstream as a hard filter and as a likelihood scale, then having a probabilistic RT model is not just ``nicer''---it can
+change the behavior of compound-level aggregation in a qualitatively important way.
 
-The main practical downside is training cost: variational inference over the hierarchy is far slower than independent
-ridge fits. This makes the hierarchical model best suited to offline retrains (periodic model refreshes), while the fast
-sklearn ridge baseline remains useful for quick iteration and regression checks. The lasso baseline remains valuable as a
-historical point of comparison, but its lack of hierarchy and its heuristic uncertainty windows make it a weaker fit for
-modern peak assignment requirements.
+\subsection{Limitations and future work}
+The main practical downside of the hierarchical model is training cost: variational inference over the hierarchy is far
+slower than independent ridge fits. This makes the hierarchical model best suited to offline retrains (periodic model
+refreshes), while the fast sklearn ridge baseline remains useful for quick iteration and regression checks. The lasso
+baseline remains valuable as a historical point of comparison, but its lack of hierarchy and its heuristic uncertainty
+windows make it a weaker fit for modern peak assignment requirements.
 
-\section{Future extensions}
-
-This section summarizes exploratory results and follow-up work needed for true cold-start scenarios.
+The end-to-end evaluation in this report is intentionally scoped: it covers a small set of SSIDs and focuses on
+single-library checks. Before deployment, the most important next step is to expand evaluation across more SSIDs
+(including multi-library sample sets) and to confirm that RT window calibration remains stable under different run
+conditions and post-processing settings. Separately, the \codeword{mixture_model} coherence probability could be exposed
+as a soft confidence score (instead of a hard rejection) to support explicit precision/recall trade-offs in downstream
+reporting.
 
 \subsection{Unseen species (exploratory holdouts)}
 
@@ -787,12 +1021,12 @@ The main results focus on seen-compound performance. To probe cold-start for new
 holdouts on a production subset with two modes:
 \begin{itemize}
   \item \texttt{species}: hold out entire species within each \texttt{species\_cluster},
-  \item \texttt{species\_comp}: hold out \texttt{(species, comp\_id)} pairs while keeping the corresponding
-  \texttt{(species\_cluster, comp\_id)} observed in training.
+  \item \texttt{species\_comp}: hold out (\texttt{species}, \texttt{comp\_id}) pairs. For each held-out pair, we keep the
+  corresponding \texttt{species\_cluster} and \texttt{comp\_id} observed in training.
 \end{itemize}
 
 We evaluate the hierarchical ridge model with an explicit unseen-species backoff (aggregate fitted
-\texttt{(species, comp\_id)} coefficients across training species to form a supercategory--compound coefficient), compare
+(\texttt{species}, \texttt{comp\_id}) coefficients across training species to form a supercategory--compound coefficient), compare
 to the supercategory ridge baseline, and include the legacy lasso bundle for context.
 
 \begin{table}[H]
@@ -833,7 +1067,6 @@ Holdout & Model & RMSE & MAE & Cov95 & Rows scored (\%) \\
 \end{tabular}
 \end{table}
 
-\paragraph{Interpretation.}
 These holdouts suggest that an explicit backoff strategy can make the hierarchical model usable for unseen species as
 long as the supercategory remains known. The high coverage values indicate the backoff is conservative; improving
 precision under unseen species will likely require either a stronger species hierarchy (so truly unseen species can be
@@ -873,27 +1106,40 @@ MLP (ChemBERTa PCA-20 + cluster interactions) & \textbf{1.061293} & \textbf{0.79
 \end{tabular}
 \end{table}
 
-\paragraph{Interpretation.}
 Point accuracy in the true zero-shot setting is currently much better for the non-linear embedding baseline, which
 suggests the linear chemistry head inside the hierarchical model is not yet expressive enough. However, the hierarchical
 model still provides a calibrated uncertainty estimate, which is valuable for windowing. Improving the chemistry head
 while keeping the residual per-compound term $\delta_k$ (so seen-compound performance is maintained) is the key next step.
 
-\paragraph{Promising next steps.}
 Two practical extensions are: (i) add a compound-class anchor term so unseen compounds can back off to a learned class
 mean when embeddings are weak, and (ii) increase shrinkage on the chemistry-head coefficients $\theta_{\alpha,1:D}$
 (or use global shrinkage priors) to
 avoid high-variance extrapolation on held-out chemistries.
 
-\section{Conclusion}
-
-For seen-compound prediction (cap100 $\rightarrow$ realtest), the hierarchical ridge model with chemistry-informed
-compound effects provides the best overall behavior for peak assignment: competitive point accuracy and predictive
-windows with coverage close to nominal. The supercategory ridge baseline remains useful for speed, but its optimistic
-intervals make it risky as a filtering model without explicit calibration. The lasso baseline highlights the limitations of
-non-hierarchical, sparsity-driven models under correlated run covariates and heuristic uncertainty windows.
+In conclusion, the combination of a probabilistic RT regression model and an SSID-specific coherence score provides a
+more principled RT pipeline for autocuration: calibrated per-task uncertainty supports reliable RT filtering, and the
+mixture-based compound-level probability provides a continuous, data-adaptive criterion for rejecting likely false
+positives without a fixed global threshold. The remaining work is to broaden end-to-end evaluation and to improve
+cold-start behavior for truly unseen species and chemistries while preserving seen-compound performance.
 
 \appendix
+
+\section{Sally integration details}
+\label{app:sally_integration}
+
+To support \codeword{COMPASSIGN_PP_RIDGE} end-to-end inside \texttt{sally-dev}, we made the following focused changes:
+\begin{itemize}
+  \item Added \codeword{modelType=COMPASSIGN_PP_RIDGE} which loads CompAssign stage-1 coefficient summaries and backoff
+  summaries (both shipped as \texttt{.npz} artifacts), and computes per-task RT windows from predictive variance.
+  \item Generalized Sally's regression predictor so RT windows can be either per-compound (1D) or per-(task,compound) (2D),
+  since \codeword{COMPASSIGN_PP_RIDGE} produces row-specific uncertainty.
+  \item Added CompAssign RT inputs (species, species\_cluster, and covariates CSV) and \texttt{--force-curate} to run the
+  full curation pipeline for evaluation even when a sample set would normally be skipped.
+  \item Updated \texttt{sally-dev evaluate} to fail fast when the underlying pipeline run fails (instead of continuing with
+  stale cached pickles), and updated the pipeline wrapper and \codeword{COMPASSIGN_PP_RIDGE} loader so production-style RT
+  covariates can be mounted into the Docker container and read efficiently by streaming only the required task IDs
+  (important for multi-GB lib209 covariates CSVs).
+\end{itemize}
 
 \section{Collapsed-slope derivation}
 \label{app:collapsed_slopes}
@@ -901,6 +1147,29 @@ non-hierarchical, sparsity-driven models under correlated run covariates and heu
 This appendix shows, step by step, how we integrate out the ridge-regularized slope coefficients for one group $g$.
 This yields a marginal (``collapsed'') likelihood that depends only on compact per-group summary statistics, which is why
 the PyMC model can scale to production data.
+
+\subsection{Summary (what is being collapsed and why)}
+
+Within each group $g$, the RT model is a standard linear regression with a Gaussian ridge prior on slopes:
+\[
+  y_g = b_g\mathbf{1}_{n_g} + X_g w_g + \epsilon_g,
+  \qquad
+  \epsilon_g \sim \mathcal{N}(0,\sigma^2 I_{n_g}),
+  \qquad
+  w_g \sim \mathcal{N}\!\left(m_g,\;(\sigma^2/\lambda_{\mathrm{slopes}})\,I_p\right).
+\]
+
+Because both the likelihood and the prior are Gaussian, we can integrate out $w_g$ exactly. The marginal distribution of
+$y_g$ remains Gaussian:
+\[
+  y_g \mid b_g,m_g,\sigma^2 \sim
+  \mathcal{N}\!\left(b_g\mathbf{1}_{n_g}+X_g m_g,\;\sigma^2\left(I_{n_g}+\tfrac{1}{\lambda_{\mathrm{slopes}}}X_gX_g^\top\right)\right).
+\]
+
+This is useful computationally: the group log-likelihood can be written in terms of a $p{\times}p$ matrix
+$I_p+\tfrac{1}{\lambda_{\mathrm{slopes}}}X_g^\top X_g$ (instead of an $n_g{\times}n_g$ covariance matrix). Since $p$ is
+small (number of run covariates), this lets the PyMC model evaluate many groups efficiently while still retaining a
+proper Bayesian ridge effect on slopes.
 
 \subsection{Setup and notation (one group)}
 
@@ -1075,7 +1344,7 @@ We will show (in full) that:
   r_g^\top C_g^{-1}r_g = r_g^\top r_g - s_g^\top A_g^{-1}s_g.
 \]
 
-\paragraph{Step 5a: determinant reduction (matrix determinant lemma).}
+\subsubsection{Step 5a: determinant reduction (matrix determinant lemma)}
 We start from the definition $C_g = I_{n_g} + \lambda_{\mathrm{slopes}}^{-1}X_gX_g^\top$.
 Introduce the scaled matrix $\tilde{X}_g \equiv \lambda_{\mathrm{slopes}}^{-1/2}X_g$, so that
 $\tilde{X}_g\tilde{X}_g^\top = \lambda_{\mathrm{slopes}}^{-1}X_gX_g^\top$. Then:
@@ -1108,7 +1377,7 @@ Finally take logs:
   \log|C_g| = \log|A_g| - p\log(\lambda_{\mathrm{slopes}}).
 \]
 
-\paragraph{Step 5b: inverse/quadratic-form reduction (Woodbury identity).}
+\subsubsection{Step 5b: inverse/quadratic-form reduction (Woodbury identity)}
 We again start from $C_g = I_{n_g} + \lambda_{\mathrm{slopes}}^{-1}X_gX_g^\top$.
 The Woodbury identity states:
 \[
@@ -1169,83 +1438,82 @@ for every row as an explicit latent variable.
 We now derive (without skipping steps) the conditional posterior distribution of $w_g$ for one group, given the
 hyperparameters and the intercept $b_g$.
 
-\paragraph{Start from likelihood and prior.}
-Write the centered response as $\tilde{y}_g = y_g - b_g\mathbf{1}_{n_g}$.
-Then the likelihood is:
-\[
-  \tilde{y}_g \mid w_g,\sigma^2 \sim \mathcal{N}(X_g w_g,\sigma^2 I_{n_g}).
-\]
-The ridge prior is:
-\[
-  w_g \mid m_g,\sigma^2,\lambda_{\mathrm{slopes}} \sim \mathcal{N}\!\left(m_g,(\sigma^2/\lambda_{\mathrm{slopes}})I_p\right).
-\]
+\begin{enumerate}
+  \item Start from the likelihood and prior. Write the centered response as
+  $\tilde{y}_g = y_g - b_g\mathbf{1}_{n_g}$. The likelihood is:
+  \[
+    \tilde{y}_g \mid w_g,\sigma^2 \sim \mathcal{N}(X_g w_g,\sigma^2 I_{n_g}).
+  \]
+  The ridge prior is:
+  \[
+    w_g \mid m_g,\sigma^2,\lambda_{\mathrm{slopes}} \sim
+    \mathcal{N}\!\left(m_g,(\sigma^2/\lambda_{\mathrm{slopes}})I_p\right).
+  \]
 
-\paragraph{Write the unnormalized log posterior.}
-Up to an additive constant (that does not depend on $w_g$),
-\begin{align*}
-  \log p(w_g \mid \tilde{y}_g,m_g,\sigma^2,\lambda_{\mathrm{slopes}})
-  &\propto \log p(\tilde{y}_g \mid w_g,\sigma^2) + \log p(w_g \mid m_g,\sigma^2,\lambda_{\mathrm{slopes}}) \\
-  &\propto -\frac{1}{2\sigma^2}\|\tilde{y}_g - X_g w_g\|_2^2
-           -\frac{\lambda_{\mathrm{slopes}}}{2\sigma^2}\|w_g - m_g\|_2^2.
-\end{align*}
+  \item Write the unnormalized log posterior. Up to an additive constant (that does not depend on $w_g$),
+  \begin{align*}
+    \log p(w_g \mid \tilde{y}_g,m_g,\sigma^2,\lambda_{\mathrm{slopes}})
+    &\propto \log p(\tilde{y}_g \mid w_g,\sigma^2) + \log p(w_g \mid m_g,\sigma^2,\lambda_{\mathrm{slopes}}) \\
+    &\propto -\frac{1}{2\sigma^2}\|\tilde{y}_g - X_g w_g\|_2^2
+             -\frac{\lambda_{\mathrm{slopes}}}{2\sigma^2}\|w_g - m_g\|_2^2.
+  \end{align*}
 
-\paragraph{Expand both squared norms.}
-First expand the likelihood term:
-\begin{align*}
-  \|\tilde{y}_g - X_g w_g\|_2^2
-  &= (\tilde{y}_g - X_g w_g)^\top(\tilde{y}_g - X_g w_g) \\
-  &= \tilde{y}_g^\top\tilde{y}_g - 2 w_g^\top X_g^\top \tilde{y}_g + w_g^\top X_g^\top X_g w_g.
-\end{align*}
-Next expand the prior term:
-\begin{align*}
-  \|w_g - m_g\|_2^2
-  &= (w_g - m_g)^\top(w_g - m_g) \\
-  &= w_g^\top w_g - 2 w_g^\top m_g + m_g^\top m_g.
-\end{align*}
+  \item Expand both squared norms. First expand the likelihood term:
+  \begin{align*}
+    \|\tilde{y}_g - X_g w_g\|_2^2
+    &= (\tilde{y}_g - X_g w_g)^\top(\tilde{y}_g - X_g w_g) \\
+    &= \tilde{y}_g^\top\tilde{y}_g - 2 w_g^\top X_g^\top \tilde{y}_g + w_g^\top X_g^\top X_g w_g.
+  \end{align*}
+  Next expand the prior term:
+  \begin{align*}
+    \|w_g - m_g\|_2^2
+    &= (w_g - m_g)^\top(w_g - m_g) \\
+    &= w_g^\top w_g - 2 w_g^\top m_g + m_g^\top m_g.
+  \end{align*}
 
-\paragraph{Collect terms that depend on $w_g$.}
-Ignoring constants (terms not involving $w_g$), the exponent becomes:
-\[
-  -\frac{1}{2\sigma^2}\left[
-    w_g^\top(X_g^\top X_g + \lambda_{\mathrm{slopes}} I_p)w_g
-    - 2 w_g^\top(X_g^\top \tilde{y}_g + \lambda_{\mathrm{slopes}} m_g)
-  \right].
-\]
-Define $A_g \equiv X_g^\top X_g + \lambda_{\mathrm{slopes}} I_p$ and $h_g \equiv X_g^\top \tilde{y}_g + \lambda_{\mathrm{slopes}} m_g$.
-Then the exponent is:
-\[
-  -\frac{1}{2\sigma^2}\left[w_g^\top A_g w_g - 2 w_g^\top h_g\right].
-\]
+  \item Collect the terms that depend on $w_g$. Ignoring constants (terms not involving $w_g$), the exponent becomes:
+  \[
+    -\frac{1}{2\sigma^2}\left[
+      w_g^\top(X_g^\top X_g + \lambda_{\mathrm{slopes}} I_p)w_g
+      - 2 w_g^\top(X_g^\top \tilde{y}_g + \lambda_{\mathrm{slopes}} m_g)
+    \right].
+  \]
+  Define $A_g \equiv X_g^\top X_g + \lambda_{\mathrm{slopes}} I_p$ and
+  $h_g \equiv X_g^\top \tilde{y}_g + \lambda_{\mathrm{slopes}} m_g$. Then the exponent is:
+  \[
+    -\frac{1}{2\sigma^2}\left[w_g^\top A_g w_g - 2 w_g^\top h_g\right].
+  \]
 
-\paragraph{Complete the square.}
-For any symmetric positive-definite matrix $A$ and vector $h$, we have:
-\[
-  w^\top A w - 2 w^\top h = (w - A^{-1}h)^\top A (w - A^{-1}h) - h^\top A^{-1}h.
-\]
-Applying this with $A=A_g$ and $h=h_g$, the posterior is a Gaussian with mean $A_g^{-1}h_g$ and covariance $\sigma^2 A_g^{-1}$:
-\[
-  w_g \mid y_g,b_g,m_g,\sigma^2,\lambda_{\mathrm{slopes}}
-  \sim \mathcal{N}\!\left(A_g^{-1}h_g,\; \sigma^2 A_g^{-1}\right).
-\]
+  \item Complete the square. For any symmetric positive-definite matrix $A$ and vector $h$, we have:
+  \[
+    w^\top A w - 2 w^\top h = (w - A^{-1}h)^\top A (w - A^{-1}h) - h^\top A^{-1}h.
+  \]
+  Applying this with $A=A_g$ and $h=h_g$, the posterior is a Gaussian with mean $A_g^{-1}h_g$ and covariance
+  $\sigma^2 A_g^{-1}$:
+  \[
+    w_g \mid y_g,b_g,m_g,\sigma^2,\lambda_{\mathrm{slopes}}
+    \sim \mathcal{N}\!\left(A_g^{-1}h_g,\; \sigma^2 A_g^{-1}\right).
+  \]
 
-\paragraph{Rewrite the posterior mean using $r_g$ and $s_g$.}
-Recall that $r_g = \tilde{y}_g - X_g m_g$, so $\tilde{y}_g = X_g m_g + r_g$. Then:
-\begin{align*}
-  h_g
-  &= X_g^\top \tilde{y}_g + \lambda_{\mathrm{slopes}} m_g \\
-  &= X_g^\top (X_g m_g + r_g) + \lambda_{\mathrm{slopes}} m_g \\
-  &= (X_g^\top X_g + \lambda_{\mathrm{slopes}} I_p)m_g + X_g^\top r_g \\
-  &= A_g m_g + s_g.
-\end{align*}
-Therefore:
-\[
-  A_g^{-1}h_g = A_g^{-1}(A_g m_g + s_g) = m_g + A_g^{-1}s_g,
-\]
-and we recover the compact form:
-\[
-  w_g \mid y_g,b_g,m_g,\sigma^2,\lambda_{\mathrm{slopes}}
-  \sim \mathcal{N}\!\left(m_g + A_g^{-1}s_g,\; \sigma^2 A_g^{-1}\right).
-\]
+  \item Rewrite the posterior mean using $r_g$ and $s_g$. Recall that $r_g = \tilde{y}_g - X_g m_g$, so
+  $\tilde{y}_g = X_g m_g + r_g$. Then:
+  \begin{align*}
+    h_g
+    &= X_g^\top \tilde{y}_g + \lambda_{\mathrm{slopes}} m_g \\
+    &= X_g^\top (X_g m_g + r_g) + \lambda_{\mathrm{slopes}} m_g \\
+    &= (X_g^\top X_g + \lambda_{\mathrm{slopes}} I_p)m_g + X_g^\top r_g \\
+    &= A_g m_g + s_g.
+  \end{align*}
+  Therefore:
+  \[
+    A_g^{-1}h_g = A_g^{-1}(A_g m_g + s_g) = m_g + A_g^{-1}s_g,
+  \]
+  and we recover the compact form:
+  \[
+    w_g \mid y_g,b_g,m_g,\sigma^2,\lambda_{\mathrm{slopes}}
+    \sim \mathcal{N}\!\left(m_g + A_g^{-1}s_g,\; \sigma^2 A_g^{-1}\right).
+  \]
+\end{enumerate}
 
 These formulas are what we use after ADVI to recover per-group slope posterior means and covariances. Combined with the
 intercept treatment in the main model, they produce the exported stage-1 coefficient summaries used for scoring.

@@ -21,16 +21,36 @@ if [[ $# -ne 0 ]]; then
 fi
 
 CAP="cap100"
-LIB_IDS=(208 209)
+LIB_IDS_DEFAULT=(208 209)
+LIB_IDS=("${LIB_IDS_DEFAULT[@]}")
+if [[ -n "${COMPASSIGN_RT_LIBS:-}" ]]; then
+  IFS=',' read -r -a RAW_LIB_IDS <<<"${COMPASSIGN_RT_LIBS}"
+  LIB_IDS=()
+  for tok in "${RAW_LIB_IDS[@]}"; do
+    tok="${tok//[[:space:]]/}"
+    if [[ -n "${tok}" ]]; then
+      LIB_IDS+=( "${tok}" )
+    fi
+  done
+fi
 
-TS="$(date +%Y%m%d_%H%M%S)"
-RUN_DIR="output/rt_prod_${TS}"
+RUN_DIR="output/rt_ridge_partial_pooling"
 if [[ "${RUN_DIR}" != /* ]]; then
   RUN_DIR="${REPO_ROOT}/${RUN_DIR}"
 fi
 
 mkdir -p "${RUN_DIR}/logs"
 echo "${RUN_DIR}" > "${REPO_ROOT}/output/rt_prod_latest.txt"
+
+PYMC_METHOD="${COMPASSIGN_RT_PYMC_METHOD:-advi}"
+if [[ "${PYMC_METHOD}" != "advi" && "${PYMC_METHOD}" != "map" ]]; then
+  echo "ERROR: Invalid COMPASSIGN_RT_PYMC_METHOD=${PYMC_METHOD} (expected 'advi' or 'map')" >&2
+  exit 2
+fi
+PYMC_ADVI_STEPS="${COMPASSIGN_RT_ADVI_STEPS:-}"
+PYMC_ADVI_LOG_EVERY="${COMPASSIGN_RT_ADVI_LOG_EVERY:-}"
+PYMC_ADVI_DRAWS="${COMPASSIGN_RT_ADVI_DRAWS:-}"
+PYMC_MAP_MAXEVAL="${COMPASSIGN_RT_MAP_MAXEVAL:-}"
 
 run_cmd() {
   local log_path="$1"
@@ -57,14 +77,24 @@ for lib in "${LIB_IDS[@]}"; do
   if [[ -f "${PARTIAL_COEFF}" ]]; then
     echo "[train] Skip partial pooling (exists): ${PARTIAL_COEFF}"
   else
+    PYMC_ARGS=(--model partial_pool --include-es-all --method "${PYMC_METHOD}" --lambda-slopes 3e-4)
+    if [[ "${PYMC_METHOD}" == "advi" && -n "${PYMC_ADVI_STEPS}" ]]; then
+      PYMC_ARGS+=(--advi-steps "${PYMC_ADVI_STEPS}")
+    fi
+    if [[ "${PYMC_METHOD}" == "advi" && -n "${PYMC_ADVI_LOG_EVERY}" ]]; then
+      PYMC_ARGS+=(--advi-log-every "${PYMC_ADVI_LOG_EVERY}")
+    fi
+    if [[ "${PYMC_METHOD}" == "advi" && -n "${PYMC_ADVI_DRAWS}" ]]; then
+      PYMC_ARGS+=(--advi-draws "${PYMC_ADVI_DRAWS}")
+    fi
+    if [[ "${PYMC_METHOD}" == "map" && -n "${PYMC_MAP_MAXEVAL}" ]]; then
+      PYMC_ARGS+=(--map-maxeval "${PYMC_MAP_MAXEVAL}")
+    fi
     run_cmd "${PARTIAL_LOG}" \
       poetry run python -u -m compassign.rt.train_rt_pymc_collapsed_ridge \
         --data-csv "${TRAIN_CSV}" \
         --output-dir "${PARTIAL_OUT}" \
-        --model partial_pool \
-        --include-es-all \
-        --method advi \
-        --lambda-slopes 3e-4
+        "${PYMC_ARGS[@]}"
   fi
 
   # 2) sklearn ridge baseline.

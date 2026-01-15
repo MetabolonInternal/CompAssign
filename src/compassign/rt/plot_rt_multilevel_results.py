@@ -37,6 +37,18 @@ DEFAULT_SUPPORT_BIN_ORDER = ["<= 1", "2-2", "3-5", "6-10", "11-20", "21-50", "51
 _ADVI_ELAPSED_MIN_RE = re.compile(r"\[advi\] iter=\d+/\d+ .*elapsed_min=(?P<min>\d+\.?\d*)")
 _TAG_SAFE_RE = re.compile(r"[^A-Za-z0-9_-]+")
 
+# More muted, paper-friendly colors (loosely based on seaborn's "deep" palette).
+_MODEL_COLORS = {
+    "pymc_collapsed_group_species": "#C44E52",  # muted red
+    "pymc_pooled_species_comp_hier_supercat": "#8172B3",  # muted purple
+    "pymc_pooled_species_comp_hier_supercat_cluster_supercat": "#55A868",  # muted green
+    "pymc_pooled_species_chem_hier_cluster_supercat": "#8172B3",  # muted purple
+    "pymc_collapsed_group_species_cluster": "#64B5CD",  # muted teal
+    "pymc_collapsed_group_species_cluster_poly2": "#64B5CD",  # muted teal
+    "sklearn_ridge_species_cluster": "#4C72B0",  # muted blue
+    "lasso_eslasso_species_cluster": "#DD8452",  # muted orange
+}
+
 LASSO_CLUSTER_CSV = {
     "lasso_eslasso_species_cluster": "rt_eval_lasso_by_species_cluster_realtest.csv",
 }
@@ -810,17 +822,6 @@ def _plot_per_lib_cluster_panels(
         LOGGER.warning("No requested models present in by-species-cluster summary; skipping plots.")
         return
 
-    color_map = {
-        "pymc_collapsed_group_species": "tab:blue",
-        "pymc_pooled_species_comp_hier_supercat": "tab:green",
-        "pymc_pooled_species_comp_hier_supercat_cluster_supercat": "tab:green",
-        "pymc_pooled_species_chem_hier_cluster_supercat": "tab:purple",
-        "pymc_collapsed_group_species_cluster": "tab:orange",
-        "pymc_collapsed_group_species_cluster_poly2": "tab:orange",
-        "sklearn_ridge_species_cluster": "tab:cyan",
-        "lasso_eslasso_species_cluster": "tab:red",
-    }
-
     tag_label = _format_tag_for_title(tag_suffix)
 
     for lib in libs:
@@ -879,7 +880,7 @@ def _plot_per_lib_cluster_panels(
                     y,
                     width=bar_width,
                     label=model_labels.get(model, _safe_model_label(model)),
-                    color=color_map.get(model, None),
+                    color=_MODEL_COLORS.get(model, None),
                     alpha=0.85,
                 )
             ax.set_ylabel(ylabel)
@@ -943,17 +944,6 @@ def _plot_support_curves(
 
     tag_label = _format_tag_for_title(tag_suffix)
 
-    color_map = {
-        "pymc_collapsed_group_species": "tab:blue",
-        "pymc_pooled_species_comp_hier_supercat": "tab:green",
-        "pymc_pooled_species_comp_hier_supercat_cluster_supercat": "tab:green",
-        "pymc_pooled_species_chem_hier_cluster_supercat": "tab:purple",
-        "pymc_collapsed_group_species_cluster": "tab:orange",
-        "pymc_collapsed_group_species_cluster_poly2": "tab:orange",
-        "sklearn_ridge_species_cluster": "tab:cyan",
-        "lasso_eslasso_species_cluster": "tab:red",
-    }
-
     for lib in libs:
         df = support_df[
             (support_df["lib"] == int(lib))
@@ -998,7 +988,7 @@ def _plot_support_curves(
                     y,
                     width=bar_width,
                     label=model_labels.get(model, _safe_model_label(model)),
-                    color=color_map.get(model, None),
+                    color=_MODEL_COLORS.get(model, None),
                     alpha=0.85,
                 )
             ax.set_ylabel(ylabel)
@@ -1057,17 +1047,6 @@ def _plot_global_comparison(
         LOGGER.warning("No requested models present in global metrics; skipping global plots.")
         return
 
-    color_map = {
-        "pymc_collapsed_group_species": "tab:blue",
-        "pymc_pooled_species_comp_hier_supercat": "tab:green",
-        "pymc_pooled_species_comp_hier_supercat_cluster_supercat": "tab:green",
-        "pymc_pooled_species_chem_hier_cluster_supercat": "tab:purple",
-        "pymc_collapsed_group_species_cluster": "tab:orange",
-        "pymc_collapsed_group_species_cluster_poly2": "tab:orange",
-        "sklearn_ridge_species_cluster": "tab:cyan",
-        "lasso_eslasso_species_cluster": "tab:red",
-    }
-
     metrics = [
         ("rmse", "RMSE (min)", "linear"),
         ("cov95", "Cov95", "coverage"),
@@ -1113,7 +1092,7 @@ def _plot_global_comparison(
             df_metric = df.reindex(plot_models)
             x = np.arange(len(plot_models))
             labels = [model_labels.get(m, _safe_model_label(m)) for m in plot_models]
-            colors = [color_map.get(m, None) for m in plot_models]
+            colors = [_MODEL_COLORS.get(m, None) for m in plot_models]
             y = df_metric[col].astype(float).to_numpy()
             ax.bar(x, y, color=colors, alpha=0.85)
             ax.set_xticks(x)

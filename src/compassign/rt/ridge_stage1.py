@@ -53,7 +53,8 @@ def infer_feature_columns(columns: Sequence[str], *, es_candidates: Sequence[str
     """
     is_cols = sorted([str(c) for c in columns if str(c).startswith("IS")])
     rs_cols = sorted([str(c) for c in columns if str(c).startswith("RS")])
-    es_cols = [str(c) for c in es_candidates if str(c) in set(map(str, columns))]
+    cols_set = set(map(str, columns))
+    es_cols = [str(c) for c in es_candidates if str(c) in cols_set]
     if not is_cols:
         raise ValueError("No IS* covariate columns detected in CSV")
     return [*is_cols, *rs_cols, *es_cols]

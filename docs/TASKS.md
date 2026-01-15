@@ -1,191 +1,98 @@
-# Tasks
+# Sally realtest TS improvement (RT + CompAssign partial-pooling ridge)
 
-## RT Ridge Models (cap100)
+Objective: increase `mdsutils` TS on Sally realtest SSIDs using the baseline peak-assignment method, without calling
+standards or X-compounds (hard requirement). We still report the official `mdsutils` TS (which includes standards and
+X-compounds in the evaluation set).
 
-### Status (partial pooling ridge, 2025-12-25)
+## Scope (from `src/compassign/rt/sally_test.sh`)
+- lib209: SSID 20159 (supercat8), SSID 23059 (supercat6)
+- lib208: SSID 12307 (supercat6), SSID 12609 (supercat8), SSID 12725 (supercat6)
 
-- Recommended model: PyMC ridge with partial pooling (exports `Stage1CoeffSummaries`).
-- Baselines: PyMC ridge (supercategory) and sklearn ridge (supercategory). Optional legacy lasso baselines exist but are not required.
-- Reproduce (cap100 → realtest):
-  - `./src/compassign/rt/train.sh`
-  - `./src/compassign/rt/eval.sh`
-  - `poetry run python -m compassign.rt.plot_rt_multilevel_results --cap cap100 --libs 208,209 --anchor none --tag full`
-- Report: `docs/models/rt_pymc_multilevel_pooling_report.pdf`
+## What worked (keep)
+### RT coherence rejection (q10) for `COMPASSIGN_PP_RIDGE`
+This adds a *compound-level* RT-consistency check: for each compound, take the per-task RT log-likelihood values of the
+peaks Sally is about to call (restricted to LC sample types), compute a lower-tail quantile (q10 by default), and reject
+the compound if that quantile is too low. Operationally this targets the main failure mode we saw in the marginal TS
+regime: compounds that accumulate plausible-but-wrong completes across many tasks (often within the RT window), yielding
+many FP/FCPD. The rejection preferentially removes those incoherent patterns while keeping compounds whose called peaks are
+consistently plausible under the RT model.
 
-## RT Multi-Level Curate + Supercategory (new)
+This is not “Bayesian-only”. The key requirement is a *continuous* per-candidate RT plausibility score that is at least
+roughly calibrated across tasks. A Bayesian posterior predictive density is one principled way to get that, but you could
+implement the same idea with any model that outputs a predictive mean plus a usable scale (e.g. a frequentist regression
+with an empirical error model, or even a heuristic score if it behaves like a likelihood). The main contrast with the
+historical baseline windowing is that the baseline is primarily a *hard filter + nearest-to-centre picker*, which cannot
+penalize “barely inside the window” decoys or express cross-task coherence as a single decision.
 
-Goal
+### Use Sally's default `windowMultiplier=4` for `COMPASSIGN_PP_RIDGE`
+Sally has historically used `windowMultiplier` (default 4) as a tuning knob for heuristic RT windows. For the CompAssign
+modelType we previously defaulted to multiplier=1 because the exported windows are already intended to be nominal
+prediction intervals. Empirically, the strongest TS gains on the realtest SSIDs required using multiplier=4 here as well.
+Operationally, this makes the hard RT filter less brittle (fewer true peaks are excluded) while giving the q10 coherence
+rejection enough dynamic range to act as the precision lever (net TS gains on the realtest SSIDs).
 
-- Build a single RT model that can behave like:
-  - a curate model (per species/matrix phrase) when data are sufficient, and
-  - a supercategory model (pooled across related phrases) when data are sparse,
-  without hard relabel-and-merge.
+### Encode the working defaults in `src/compassign/rt/sally_test.sh`
+`src/compassign/rt/sally_test.sh` stages the exact RT artifacts used by the report and runs the fixed 5-SSID check in a
+single command. The q10 coherence rejection and `windowMultiplier=4` behavior are now defaults in Sally for `COMPASSIGN_PP_RIDGE`, so
+the script no longer depends on a large set of `SALLY_RT_*` environment knobs.
 
-Key observation (repo_export)
+### Shelve `lc_column` RT covariate (not validated)
+We retrained CompAssign RT artifacts that include `lc_column` as an additional covariate, but we did not validate that
+it improves generalization across SSIDs / libs. We are therefore treating `lc_column` as out-of-scope for this baseline
+and removing it from the default training/staging paths until there is clear evidence it helps.
 
-- The production CSVs in `repo_export/lib{208,209}/cap*/..._rt_prod.csv` include both `species` and `species_cluster`.
-- `repo_export/lib{208,209}/species_mapping/*_species_mapping.csv` clarifies semantics:
-  - `species` is an integer encoding of `species_raw` (intended to be a curate-like subgroup id),
-  - `species_cluster` is an integer encoding of `species_group_raw` (supercategory group).
-- Important: for hierarchical pooling we need `species` to be nested under `species_cluster` (each `species` value belongs to
-  exactly one `species_cluster`). lib209 already satisfies this when `species_raw = species_matrix_type`; lib208 needs a better
-  `species_raw` definition than organism-only labels.
-- Our current `Stage1CoeffSummaries` convention uses `(group_id << 32) + comp_id` keys; historically `group_id` was
-  `species_cluster`.
+## Latest Oracle-backed rerun (VPN on)
+Command: `conda activate sally && ./src/compassign/rt/sally_test.sh`
 
-What we should do (fix mapping semantics)
+`COMPASSIGN_PP_RIDGE` in this script includes:
+- hard RT window filtering + baseline per-task peak selection (closest to corrected expected RT)
+- q10 RT coherence rejection across tasks (LC only; q=0.1; min q10 loglik=3.4)
+- uses Sally default `windowMultiplier=4`
 
-- Regenerate mappings with `python -m compassign.rt.data_prep.check_rt_metadata_mapping`:
-  - lib209: `species_raw = species_matrix_type`, `species_group_raw = group`.
-  - lib208: `species_raw = JCJ_COMBO`, `species_group_raw = group`.
-  - The script enforces nesting (each `species_raw` belongs to exactly one `group`) and drops rows with missing group.
-- For reproducibility, use the end-to-end prep runner:
-  - `./src/compassign/rt/prep.sh`
+| lib | supercat | ssid  | model              | precision | recall | ts     |
+|---:|---------:|------:|--------------------|----------:|-------:|-------:|
+| 208 | 6        | 12307 | ESLASSO            | 0.8436    | 0.7848 | 0.6851 |
+| 208 | 6        | 12307 | COMPASSIGN_PP_RIDGE | 0.9390    | 0.8113 | 0.7706 |
+| 208 | 8        | 12609 | ESLASSO            | 0.8553    | 0.6513 | 0.5867 |
+| 208 | 8        | 12609 | COMPASSIGN_PP_RIDGE | 0.9328    | 0.8031 | 0.7592 |
+| 208 | 6        | 12725 | ESLASSO            | 0.6808    | 0.8610 | 0.6134 |
+| 208 | 6        | 12725 | COMPASSIGN_PP_RIDGE | 0.9303    | 0.8807 | 0.8262 |
+| 209 | 8        | 20159 | ESLASSO            | 0.8865    | 0.8697 | 0.7825 |
+| 209 | 8        | 20159 | COMPASSIGN_PP_RIDGE | 0.9871    | 0.8848 | 0.8747 |
+| 209 | 6        | 23059 | ESLASSO            | 0.8357    | 0.5940 | 0.5319 |
+| 209 | 6        | 23059 | COMPASSIGN_PP_RIDGE | 0.8943    | 0.6737 | 0.6241 |
 
-Concrete spec (collapsed ridge; explicit intercept)
+## Attempted in this session (did not help materially; deprioritize)
+- [x] Per-peak RT filtering sweeps (minimal TS movement on lib209):
+  - [x] Soft filtering by z-score / log-likelihood thresholds
+  - [x] Top-k filtering
+  - [x] CF/mode heuristics alone
 
-- Observations (rows): `rt_i` with run covariates `x_i` (IS/RS/ES + optional poly2 terms).
-- Group for coefficient artifact: `g = (group_id, comp_id)` where `group_id` is defined by `--group-col`, e.g.:
-  - `species_cluster` (supercategory-only; status quo),
-  - `species` (curate-like subgroup nested within supercategory).
-- Likelihood: `rt_i ~ Normal(b_g + x_i·w_g, sigma_y)`.
-- Slopes: `w_g` are *collapsed* analytically with ridge precision `lambda_diag` (same as existing implementation).
-- Intercepts: keep explicit in PyMC so we can add hierarchy, but export as the implied intercept in `Stage1CoeffSummaries`
-  (same export path as existing explicit-intercept models).
+## Shelved for later (needs separate validation)
+- [x] `lc_column` as an RT covariate: retrained artifacts exist, but we are not using them until we see clear gains on both
+  libs and are confident it generalizes. This is removed from the current baseline; revisiting it should be done as a
+  separate effort with explicit validation.
 
-Supercategory-aware pooling (intended behavior)
+## Next priority (cleanup, preserve the new baseline)
+The TS table in `docs/models/rt_pymc_multilevel_pooling_report.tex` (CompAssign PP ridge + q10 + window multiplier=4) is
+the baseline for future work. The next work item is to reduce both repos to the minimal changes required to reproduce
+those numbers, and to remove experimental branches/knobs that are not needed.
 
-- When `group_id` maps deterministically to `species_cluster` (i.e. `group_col=species` with a nested subgroup mapping),
-  add a supercategory hierarchy for subgroup-level effects:
-  - Subgroup intercept offsets pool within `species_cluster`, with *supercategory-specific shrinkage* so “homogeneous” supercats
-    pool strongly while heterogeneous ones pool weakly.
-  - Optional: do the same for a slope-head (mean drift response) so sparse subgroups borrow a stable drift response.
+- [x] Cleanup CompAssign + Sally code to minimal diff while reproducing the LaTeX TS tables exactly.
+- [x] Remove the shelved `lc_column` path end-to-end (training/staging/docs).
+- [x] Make q10 coherence rejection + `windowMultiplier=4` the default for `COMPASSIGN_PP_RIDGE` in Sally (remove env-gated plumbing).
+- [x] Prune artifacts under `out/`, `output/`, and `external_repos/sally/out/` to keep only baseline models + results.
+- [x] Re-run `./src/compassign/rt/sally_test.sh` after pruning and confirm the LaTeX TS table is reproduced.
 
-Planned implementation (this repo)
+## Follow-ups (after cleanup)
+- [x] Quantify the q10 coherence rejection delta (ablation) on the realtest SSIDs (no-q10 vs q10, same window multiplier).
+- [ ] Explore continuous RT scoring (soft filter) as a principled next lever: use `rt_loglik` (or z) as the per-task
+  selection score and relax the hard window filter; validate carefully against false positives and generalization.
+- [ ] Revisit the correction factor (CF) heuristic: test whether CF is still needed under `COMPASSIGN_PP_RIDGE`, and if so
+  refactor it into a simpler/more principled representation.
+- [ ] If we still need more TS: pursue “cloud/mode coherence” (score/select an RT residual mode across tasks rather than
+  making independent per-task picks).
 
-- Add `--group-col {species_cluster,species}` to training + evaluators and store it in the coefficient artifact so
-  scoring knows how to compute `group_id` from CSV columns.
-- Add supercategory-aware priors for species-level effects (new intercept/slope-head variants) that consume the `species_cluster`
-  parent id when `group_id` has a unique mapping.
-- Keep inference via `--method advi|nuts|map` (NUTS recommended only for small `--max-groups` sanity checks).
-
-Smoke status
-
-- Verified on `lib208/cap5` that `--group-col species --intercept-prior comp_hier_supercat --slope-head-mode cluster_supercat`
-  trains and evaluates end-to-end with ADVI on a small subset (`--max-train-rows/--max-groups`).
-
-Next experiments (tail-first; cap5 → realtest)
-
-- Train three variants (same features/cap; compare tail-by-support):
-  - baseline grouping: `--group-col species_cluster` (status quo),
-  - subgroup grouping only: `--group-col species` (no pooling),
-  - subgroup grouping + pooling: `--group-col species --intercept-mode explicit --intercept-prior comp_hier_supercat --slope-head-mode cluster_supercat`.
-- Evaluate each with `python -m compassign.rt.eval_rt_coeff_summaries_by_support` on realtest (streaming; start with `--max-test-rows 200000`).
-
-## Covariate‑Shift: Model Change Discussion
-
-Should we change the model?
-
-- Not before tightening the experiment. It’s better to (1) keep fixed‑K as a fairness control for this benchmark, (2) use inferred (noisy) drift groups for both the hierarchical model and the cluster baseline instead of oracle ids, and (3) enable chemistry descriptors in the hierarchy so it leverages chemistry signal. Optionally add slope heterogeneity in the generator (non‑zero `species_gamma_sd`) to reflect matrix interactions. Then re‑assess.
-
-- If evidence shows species/matrix‑specific slope heterogeneity hurts hierarchical performance, consider extending the model with random slopes:
-  1) Species random slopes: γ[compound, :] + δγ_species[species, :] with shrinkage (adds flexibility at the cost of variance/compute).
-  2) Cluster random slopes: γ[compound, :] + δγ_cluster[species_cluster, :] (fewer params; aligns with drift groups).
-  3) Class×cluster slope pooling: δγ_cluster_class[class, :] for stronger structure, but heavier and riskier to identify.
-
-- Trade‑offs of adding slope heterogeneity
-  - Pros: captures matrix‑dependent covariate response; could improve far‑bin generalisation when drift differs across species.
-  - Cons: more parameters, slower NUTS, and potential confounding with species intercepts; needs strong shrinkage and careful validation.
-
-- Practical next steps
-  - Improve realism first within a single default profile: enable descriptors, keep fixed‑K, infer species drift clusters from IS features for both methods, and introduce modest slope heterogeneity in the generator.
-  - Re‑run covariate shift; if hierarchy lags in far bins with heterogeneity on, prototype a cluster‑random‑slope head and compare.
-  - Keep the base model as default; gate advanced slope variants behind a flag only if we see consistent lift.
-
-## Action Plan (Single Default Profile)
-
-- Script updates (covariate shift runner)
-  - NOTE: covariate shift + descriptor experiments are currently disabled pending a port to the RT ridge pipeline.
-  - TODO: re-implement these studies using `Stage1CoeffSummaries` artifacts (PyMC partial pooling + sklearn baseline).
-  - Keep `fixed_runs_per_species_compound=10` for fairness and comparability in this benchmark.
-  - Infer species clusters from IS features and feed the inferred labels to BOTH:
-    - the RT ridge model (for pooling), and
-    - the cluster×compound baseline (for its grouping key),
-    replacing oracle cluster ids.
-    - Approach: aggregate per‑species mean over `run_covariate_*`, standardise, KMeans with K = `hp["n_clusters"]` and fixed seed.
-  - Add a small species‑specific slope heterogeneity in the generator (default `species_gamma_sd=0.1`) to reflect realistic matrix interactions while keeping the problem well‑conditioned.
-
-- Experimental settings (default)
-  - Anchors: 0, 3, 5 (unchanged).
-  - Descriptors: ON (hierarchy receives `compound_features`).
-  - Cluster labels: inferred from IS features (for both methods).
-  - Slope heterogeneity: `species_gamma_sd = 0.1`.
-  - Scarcity: fixed K per (species, compound) retained (`fixed_runs_per_species_compound=10`).
-  - Replicates: 5 seeds; runs per species: 8 (unchanged).
-
-- Expected outcomes
-  - With descriptors on and inferred clusters, the hierarchy should improve vs the cluster baseline (especially in 80–95% bins), while species×compound remains worst.
-  - Retains fairness via fixed K but avoids oracle pooling and enables chemistry, improving realism.
-
-- Metrics and diagnostics
-  - Primary: MAE per bin ± 95% CI across replicates.
-  - Secondary: coverage and z‑score diagnostics for hierarchy; fraction of NaN predictions for baselines (missing keys).
-  - Directional goal: hierarchy achieves a clear margin (≈10–20% lower MAE) over cluster baseline in far bins under the default profile.
-
-- Risks and mitigations
-  - If inferred clusters are too strong (near‑oracle), reduce K or cluster on per‑run then map to species by majority vote to inject noise.
-  - If MCMC slows with descriptors, keep current `quick` sampler settings and rely on the fixed‑K dataset to remain tractable.
-
-- Timeline
-  - Code changes and defaults: ~0.5 day.
-  - Quick run to validate: ~15–20 minutes (unchanged order of magnitude).
-  - Doc/plot refresh: ~0.5 day.
-
-## Implementation Notes
-
-- Current RT ridge models (Stage-1 coefficient summaries):
-  - Partial pooling: `src/compassign/rt/pymc_partial_pool_ridge.py`
-  - Supercategory baseline: `src/compassign/rt/pymc_supercategory_ridge.py`
-  - Shared collapsed-slope implementation: `src/compassign/rt/ridge_stage1.py`
-
-- Legacy experiment runners that depended on the removed hierarchical RT model were removed. If needed, recover them
-  from git history and port to the Stage1CoeffSummaries-based ridge RT pipeline first.
-
-## Investigate Species×Chemistry Structure (Future Work)
-
-Motivation
-
-- Our current descriptor usage informs a global compound baseline (β_c ≈ Z_c·θ_β + δ_c) shared across species. Species effects are intercept‑only and independent of descriptors, and γ slopes (run covariates) are per‑compound (optionally class‑pooled) but not species‑specific.
-- As a result, descriptors primarily help when compounds are globally scarce or OOD (cold‑start, held‑out classes, drift). They are not designed to help when scarcity is “within a species” because there is no species×chemistry interaction.
-
-Proposal (model variants to explore)
-
-- Species‑specific descriptor coefficients (most direct):
-  - β_{c,s} = β_c + Z_c·θ_{β,s} + ε, with θ_{β,s} ~ N(θ_β, Σ) to pool across species.
-  - Adds explicit species×chemistry structure so descriptors can help when a compound is rare in species s even if well labeled globally.
-- Species‑varying γ (run covariate response) with descriptor gating:
-  - γ_{c,s} = γ_c + f_s(Z_c), where f_s is a low‑rank or linear map with shrinkage.
-  - Captures species‑specific matrix interactions that depend on chemistry.
-- Cluster‑level compromise:
-  - Share θ_{β,g} at species‑cluster level (inferred from IS), with species deviations θ_{β,s} ~ N(θ_{β,g}, ·). Fewer parameters than free per‑species heads.
-
-Shortcomings and risks
-
-- Parameter explosion and compute:
-  - Per‑species descriptor heads scale as O(n_species × d). With d≥8 and >10 species, this grows quickly; NUTS runtime and memory will increase and can destabilize adaptation.
-- Identifiability and regularization:
-  - New interactions can confound with species intercepts and compound residuals. Requires strong hierarchical priors (e.g., centered at shared θ_β, tight HalfNormal scales) and possibly dimension‑reduced Z.
-- Data requirements:
-  - Need sufficient per‑species coverage across chemistry to learn θ_{β,s} meaningfully. Synthetic generator and production regimes may not support this without dedicated scenarios.
-- Engineering complexity:
-  - Larger model surface (more code paths), trickier PPC and diagnostics, and harder to maintain. Should be gated behind an explicit flag and isolated in experiments first.
-
-Evaluation plan (if pursued)
-
-- Add a species‑rare split: define rarity per (species, compound) by counting train rows per pair and selecting a low threshold (e.g., ≤2). Report metrics on this subset explicitly.
-- Compare three arms: full (cov+desc), cov+no‑desc, and desc with species×chemistry head(s). Keep covariate settings identical.
-- Start with reduced descriptor dimension (e.g., PCA of Z to d=4–8) and strong shrinkage; run quick sampler first, then confirm with full sampler.
-
-Recommendation
-
-- Do not change the default RT model yet. Prototype species×chemistry variants in a dedicated experiment with clear gating and only adopt if they deliver consistent improvements on the species‑rare slice without unacceptable compute or instability.
+## Repro commands / knobs
+- Train CompAssign RT models: `conda activate compassign && ./src/compassign/rt/train.sh`
+- Run Sally evaluations: `conda activate sally && ./src/compassign/rt/sally_test.sh`

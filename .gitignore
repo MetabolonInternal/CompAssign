@@ -51,6 +51,9 @@ run_enhanced_simple.py
 *.toc
 *.xdv
 
+# Generated plot summaries (local)
+docs/models/images/rt_pymc_multilevel_pooling_report/*.csv
+
 # Keep output structure but not all data
 output/models/*
 !output/models/.gitkeep
@@ -72,3 +75,5 @@ external_repos/
 !docs/models/results/
 !docs/models/results/**/*
 output.old
+output.to_delete/rt_prod_20260107_170846/lib208/cap100/features_none/pymc_pooled_species_comp_hier_supercat_cluster_supercat
+output.to_delete/rt_prod_20260107_170846/lib209/cap100/features_none/pymc_pooled_species_comp_hier_supercat_cluster_supercat
